@@ -1,0 +1,13 @@
+streamlit>=1.32.0
+mediapipe==0.10.21
+opencv-python-headless
+moviepy==1.0.3
+matplotlib
+numpy
+scipy
+fastdtw
+tqdm
+yt-dlp
+Pillow
+dataclasses-json==0.6.7
+backoff==2.2.1
