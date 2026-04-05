@@ -35,6 +35,13 @@ from golf_pose_pro.video_gen import generate_debug_video
 from golf_pose_pro.export_utils import export_to_csv, export_to_json, export_3d_json
 from golf_pose_pro.club_estimation import estimate_club_positions
 from golf_pose_pro.threejs_component import build_3d_viewer_html, build_live_tracking_html
+from golf_pose_pro.kinematics import (
+    compute_all_joint_angles,
+    compute_velocities_from_frame_data,
+    compute_angular_velocity,
+    find_peak_velocities,
+)
+from golf_pose_pro.smoothing import smooth_series
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -397,6 +404,30 @@ with st.sidebar:
                                  "frames between student and pro.")
 
     st.markdown("---")
+    st.markdown("### 🎯 Smoothing & Kinematics")
+
+    use_one_euro = st.checkbox(
+        "Use adaptive smoothing (One-Euro Filter)",
+        value=True,
+        help="Adaptive low-pass filter: heavy smoothing for slow motion, "
+             "light smoothing for fast motion. Reduces landmark jitter.",
+    )
+
+    if use_one_euro:
+        oe_min_cutoff = st.slider(
+            "Min cutoff (smoothness)", 0.3, 5.0, 1.0, 0.1,
+            help="Lower = more smoothing for slow signals. Typical: 0.5–3.0.",
+        )
+        oe_beta = st.slider(
+            "Beta (speed adaptation)", 0.0, 0.1, 0.007, 0.001,
+            help="Higher = cutoff adapts faster to speed changes. Typical: 0.001–0.05.",
+            format="%.3f",
+        )
+    else:
+        oe_min_cutoff = 1.0
+        oe_beta = 0.007
+
+    st.markdown("---")
     analyze_btn = st.button("🚀 Run Analysis", use_container_width=True)
 
 
@@ -478,6 +509,9 @@ if analyze_btn:
         student_path,
         track_landmarks=track_options,
         progress_callback=student_progress,
+        apply_smoothing=use_one_euro,
+        smoothing_min_cutoff=oe_min_cutoff,
+        smoothing_beta=oe_beta,
     )
 
     if has_pro:
@@ -491,6 +525,9 @@ if analyze_btn:
             pro_path,
             track_landmarks=track_options,
             progress_callback=pro_progress,
+            apply_smoothing=use_one_euro,
+            smoothing_min_cutoff=oe_min_cutoff,
+            smoothing_beta=oe_beta,
         )
     else:
         frame_data_pro = None
@@ -498,10 +535,16 @@ if analyze_btn:
     # ── Step 3: Phase detection ───────────────────────────────────────────
     update_progress(62, "🔍 Detecting swing phases — student…")
     signal_key = f"{track_options[0]}_y"
+    video_info_s = get_video_info(student_path)
+    video_fps = video_info_s.get("fps", 30.0) or 30.0
     (phase_ranges_s, swing_start_s, swing_end_s, wrist_y_s, smoothed_s) = \
         detect_swing_phases(frame_data_student, signal_key=signal_key,
                             smoothing_window=smoothing,
-                            threshold_percentile=threshold_pct)
+                            threshold_percentile=threshold_pct,
+                            use_one_euro=use_one_euro,
+                            fps=video_fps,
+                            one_euro_min_cutoff=oe_min_cutoff,
+                            one_euro_beta=oe_beta)
 
     phase_ranges_p = swing_start_p = swing_end_p = wrist_y_p = smoothed_p = None
     if has_pro and frame_data_pro:
@@ -509,7 +552,11 @@ if analyze_btn:
         (phase_ranges_p, swing_start_p, swing_end_p, wrist_y_p, smoothed_p) = \
             detect_swing_phases(frame_data_pro, signal_key=signal_key,
                                 smoothing_window=smoothing,
-                                threshold_percentile=threshold_pct)
+                                threshold_percentile=threshold_pct,
+                                use_one_euro=use_one_euro,
+                                fps=video_fps,
+                                one_euro_min_cutoff=oe_min_cutoff,
+                                one_euro_beta=oe_beta)
 
     # ── Step 4: DTW alignment + similarity ──────────────────────────────
     dtw_alignment    = None
@@ -543,6 +590,27 @@ if analyze_btn:
             if not np.all(np.isnan(arr)):
                 extra_series_s[lm.capitalize()] = arr
 
+    # ── Step 5b: Compute kinematics ──────────────────────────────────────
+    update_progress(55, "⚡ Computing velocities…")
+    velocity_data_s = compute_velocities_from_frame_data(
+        frame_data_student, fps=video_fps,
+        landmark_groups=track_options,
+    )
+
+    # Compute peak velocities per phase (wrist is primary)
+    primary_vel_key = f"{track_options[0]}_velocity"
+    if primary_vel_key in velocity_data_s:
+        peak_velocities_s = find_peak_velocities(
+            velocity_data_s[primary_vel_key], phase_ranges_s
+        )
+    else:
+        peak_velocities_s = {}
+
+    # Angles and angular velocity computed after 3D extraction (Step 6c)
+    angle_data_s = {}
+    angular_velocity_data_s = {}
+    peak_angular_vel_s = {}
+
     # ── Step 6: Comparison figure ────────────────────────────────────────
     comparison_fig = None
     if has_pro and phase_ranges_p is not None:
@@ -570,6 +638,27 @@ if analyze_btn:
 
     json_3d_bytes = export_3d_json(frames_3d_s, club_data_s, phase_ranges_s)
 
+    # ── Step 6c: Compute joint angles from 3D landmarks ─────────────────
+    update_progress(77, "📐 Computing joint angles…")
+    if frames_3d_s:
+        angle_data_s = compute_all_joint_angles(frames_3d_s)
+
+        # Smooth angle series if One-Euro is enabled
+        if use_one_euro:
+            for k, arr in angle_data_s.items():
+                angle_data_s[k] = smooth_series(
+                    arr, fps=video_fps,
+                    min_cutoff=oe_min_cutoff, beta=oe_beta,
+                )
+
+        # Angular velocities
+        for k, arr in angle_data_s.items():
+            angular_velocity_data_s[k] = compute_angular_velocity(arr, fps=video_fps)
+
+        # Peak angular velocities per phase
+        for k, arr in angular_velocity_data_s.items():
+            peak_angular_vel_s[k] = find_peak_velocities(arr, phase_ranges_s)
+
     # ── Step 7: Debug video ──────────────────────────────────────────────
     update_progress(78, "🎬 Generating debug video…")
     debug_output = os.path.join(tmp_dir, "debug.mp4")
@@ -593,11 +682,20 @@ if analyze_btn:
 
     # ── Step 8: Export data ──────────────────────────────────────────────
     update_progress(97, "📄 Preparing export data…")
-    csv_bytes  = export_to_csv(frame_data_student, phase_ranges_s)
+    csv_bytes  = export_to_csv(
+        frame_data_student, phase_ranges_s,
+        velocity_data=velocity_data_s,
+        angle_data=angle_data_s,
+        angular_velocity_data=angular_velocity_data_s,
+    )
     json_bytes = export_to_json(
         frame_data_student, phase_ranges_s,
         swing_start_s, swing_end_s,
         similarity_score=similarity_score,
+        velocity_data=velocity_data_s,
+        angle_data=angle_data_s,
+        angular_velocity_data=angular_velocity_data_s,
+        peak_velocities=peak_velocities_s,
     )
 
     # Load debug video bytes
@@ -622,6 +720,13 @@ if analyze_btn:
         "smoothed_s":     smoothed_s,
         "extra_series_s": extra_series_s,
         "total_frames_s": len(frame_data_student),
+        # Kinematics data
+        "velocity_data_s":     velocity_data_s,
+        "angle_data_s":        angle_data_s,
+        "angular_velocity_s":  angular_velocity_data_s,
+        "peak_velocities_s":   peak_velocities_s,
+        "peak_angular_vel_s":  peak_angular_vel_s,
+        "video_fps":           video_fps,
         # Pro data
         "has_pro":        has_pro,
         "phase_ranges_p": phase_ranges_p,
@@ -755,8 +860,9 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_trajectory, tab_comparison, tab_3d, tab_live, tab_video, tab_export = st.tabs([
+tab_trajectory, tab_kinematics, tab_comparison, tab_3d, tab_live, tab_video, tab_export = st.tabs([
     "📈 Trajectory",
+    "📐 Kinematics",
     "🔄 Phase Comparison",
     "🎯 3D Viewer",
     "📹 Live Tracking",
@@ -797,6 +903,173 @@ with tab_trajectory:
 
     if R["has_pro"] and R["phase_ranges_p"] and R.get("smoothed_p") is not None: # type: ignore
         pass  # Could add pro trajectory here too
+
+
+# ─── Tab 2: Kinematics ───────────────────────────────────────────────────────
+
+with tab_kinematics:
+    velocity_data_s = R.get("velocity_data_s", {})
+    angle_data_s    = R.get("angle_data_s", {})
+    angular_vel_s   = R.get("angular_velocity_s", {})
+    peak_vel_s      = R.get("peak_velocities_s", {})
+    peak_ang_vel_s  = R.get("peak_angular_vel_s", {})
+    vid_fps         = R.get("video_fps", 30.0)
+
+    # ── Peak stats cards ─────────────────────────────────────────────
+    st.markdown(_section_title("⚡", "Swing Speed & Peak Velocity"), unsafe_allow_html=True)
+
+    if peak_vel_s:
+        peak_cols = st.columns(min(len(peak_vel_s), 6))
+        for col, (phase, pv) in zip(peak_cols, peak_vel_s.items()):
+            color = PHASE_COLORS.get(phase, "#888")
+            speed_val = f"{pv['peak_speed']:.0f}"
+            col.markdown(
+                _metric_card(speed_val, f"Peak px/s", f"{phase} · frame {pv['peak_frame']}"),
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("📌 No velocity data available. Re-run analysis.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Velocity chart ───────────────────────────────────────────────
+    if velocity_data_s:
+        st.markdown(_section_title("📈", "Landmark Velocity Over Time"), unsafe_allow_html=True)
+
+        vel_fig, vel_ax = plt.subplots(figsize=(14, 4), facecolor="#0e1117")
+        vel_ax.set_facecolor("#0e1117")
+
+        vel_palette = ["#4ade80", "#fb923c", "#38bdf8", "#f472b6"]
+        for i, (name, arr) in enumerate(velocity_data_s.items()):
+            label = name.replace("_velocity", "").capitalize() + " speed"
+            vel_ax.plot(
+                np.arange(len(arr)), arr,
+                color=vel_palette[i % len(vel_palette)],
+                linewidth=1.8, label=label,
+            )
+
+        # Phase shading
+        for phase, (s, e) in phase_ranges_s.items():
+            c = PHASE_COLORS.get(phase, "#888888")
+            vel_ax.axvspan(s, e, alpha=0.12, color=c)
+
+        # Mark peak at impact
+        if peak_vel_s and "Impact" in peak_vel_s:
+            pf = peak_vel_s["Impact"]["peak_frame"]
+            ps = peak_vel_s["Impact"]["peak_speed"]
+            vel_ax.annotate(
+                f"Peak: {ps:.0f} px/s",
+                xy=(pf, ps), xytext=(pf + 10, ps * 1.1),
+                fontsize=9, color="#fb5607", fontweight="bold",
+                arrowprops=dict(arrowstyle="->", color="#fb5607", lw=1.5),
+            )
+
+        vel_ax.axvline(swing_start_s, color="#facc15", linestyle="--", linewidth=1, alpha=0.7)
+        vel_ax.axvline(swing_end_s,   color="#f87171", linestyle="--", linewidth=1, alpha=0.7)
+
+        vel_ax.set_title("Landmark Speed (px/s)", color="white", fontsize=12, pad=8)
+        vel_ax.set_xlabel("Frame", color="#94a3b8")
+        vel_ax.set_ylabel("Speed (px/s)", color="#94a3b8")
+        vel_ax.tick_params(colors="#94a3b8")
+        vel_ax.legend(loc="upper right", fontsize=8, facecolor="#1e293b",
+                      labelcolor="white", framealpha=0.7)
+        for spine in vel_ax.spines.values():
+            spine.set_edgecolor("#334155")
+        vel_fig.tight_layout()
+
+        st.pyplot(vel_fig, use_container_width=True)
+        plt.close(vel_fig)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Joint angle chart ─────────────────────────────────────────────
+    if angle_data_s:
+        st.markdown(_section_title("📐", "Joint Angles Over Time"), unsafe_allow_html=True)
+
+        # Let user pick which angles to show
+        available_angles = list(angle_data_s.keys())
+        default_angles = [a for a in ["elbow_L", "elbow_R", "spine_tilt"]
+                          if a in available_angles]
+        selected_angles = st.multiselect(
+            "Select angles to display",
+            available_angles,
+            default=default_angles if default_angles else available_angles[:3],
+            key="angle_select",
+        )
+
+        if selected_angles:
+            ang_fig, ang_ax = plt.subplots(figsize=(14, 4), facecolor="#0e1117")
+            ang_ax.set_facecolor("#0e1117")
+
+            angle_palette = ["#4ade80", "#fb923c", "#38bdf8", "#f472b6",
+                             "#a78bfa", "#facc15", "#22d3ee"]
+            for i, name in enumerate(selected_angles):
+                arr = angle_data_s[name]
+                label = name.replace("_", " ").title()
+                ang_ax.plot(
+                    np.arange(len(arr)), arr,
+                    color=angle_palette[i % len(angle_palette)],
+                    linewidth=1.8, label=label,
+                )
+
+            for phase, (s, e) in phase_ranges_s.items():
+                c = PHASE_COLORS.get(phase, "#888888")
+                ang_ax.axvspan(s, e, alpha=0.12, color=c)
+
+            ang_ax.axvline(swing_start_s, color="#facc15", linestyle="--", linewidth=1, alpha=0.7)
+            ang_ax.axvline(swing_end_s,   color="#f87171", linestyle="--", linewidth=1, alpha=0.7)
+
+            ang_ax.set_title("Joint Angles (°)", color="white", fontsize=12, pad=8)
+            ang_ax.set_xlabel("Frame", color="#94a3b8")
+            ang_ax.set_ylabel("Angle (°)", color="#94a3b8")
+            ang_ax.tick_params(colors="#94a3b8")
+            ang_ax.legend(loc="upper right", fontsize=8, facecolor="#1e293b",
+                          labelcolor="white", framealpha=0.7)
+            for spine in ang_ax.spines.values():
+                spine.set_edgecolor("#334155")
+            ang_fig.tight_layout()
+
+            st.pyplot(ang_fig, use_container_width=True)
+            plt.close(ang_fig)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Angular velocity chart ───────────────────────────────────────
+        if angular_vel_s and selected_angles:
+            st.markdown(_section_title("🌀", "Angular Velocity"), unsafe_allow_html=True)
+
+            av_fig, av_ax = plt.subplots(figsize=(14, 4), facecolor="#0e1117")
+            av_ax.set_facecolor("#0e1117")
+
+            for i, name in enumerate(selected_angles):
+                if name in angular_vel_s:
+                    arr = angular_vel_s[name]
+                    label = name.replace("_", " ").title() + " (°/s)"
+                    av_ax.plot(
+                        np.arange(len(arr)), arr,
+                        color=angle_palette[i % len(angle_palette)],
+                        linewidth=1.8, label=label,
+                    )
+
+            for phase, (s, e) in phase_ranges_s.items():
+                c = PHASE_COLORS.get(phase, "#888888")
+                av_ax.axvspan(s, e, alpha=0.12, color=c)
+
+            av_ax.set_title("Angular Velocity (°/s)", color="white", fontsize=12, pad=8)
+            av_ax.set_xlabel("Frame", color="#94a3b8")
+            av_ax.set_ylabel("°/s", color="#94a3b8")
+            av_ax.tick_params(colors="#94a3b8")
+            av_ax.legend(loc="upper right", fontsize=8, facecolor="#1e293b",
+                          labelcolor="white", framealpha=0.7)
+            for spine in av_ax.spines.values():
+                spine.set_edgecolor("#334155")
+            av_fig.tight_layout()
+
+            st.pyplot(av_fig, use_container_width=True)
+            plt.close(av_fig)
+
+    elif not velocity_data_s:
+        st.info("📌 No kinematics data. Run analysis to compute velocity and angle metrics.")
 
 
 # ─── Tab 2: Comparison ───────────────────────────────────────────────────────

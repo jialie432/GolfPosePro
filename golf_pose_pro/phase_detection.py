@@ -12,6 +12,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
+from .smoothing import smooth_series as _one_euro_smooth
+
 
 PHASE_COLORS = {
     "Address":       "#6c757d",
@@ -29,6 +31,10 @@ def detect_swing_phases(
     smoothing_window: int = 5,
     precheck_window: int = 30,
     threshold_percentile: float = 90,
+    use_one_euro: bool = False,
+    fps: float = 30.0,
+    one_euro_min_cutoff: float = 1.0,
+    one_euro_beta: float = 0.007,
 ) -> tuple:
     """
     Detect golf swing phases from frame data.
@@ -36,9 +42,13 @@ def detect_swing_phases(
     Args:
         frame_data:            Output of extract_pose_features().
         signal_key:            Which Y-series to use ('wrist_y', 'hip_y', etc.).
-        smoothing_window:      Moving-average kernel size.
+        smoothing_window:      Moving-average kernel size (used when use_one_euro=False).
         precheck_window:       Frames at clip start to skip when finding motion onset.
         threshold_percentile:  Velocity percentile that marks swing start.
+        use_one_euro:          Use One-Euro adaptive filter instead of uniform average.
+        fps:                   Video FPS (needed for One-Euro filter).
+        one_euro_min_cutoff:   One-Euro min_cutoff (lower = more smoothing).
+        one_euro_beta:         One-Euro beta (higher = faster adaptation).
 
     Returns:
         (phase_ranges, swing_start, swing_end, wrist_y, smoothed)
@@ -62,7 +72,11 @@ def detect_swing_phases(
         np.maximum.accumulate(idx, out=idx)
         raw = raw[idx]
 
-    smoothed = uniform_filter1d(raw, size=smoothing_window, mode="nearest")
+    smoothed = (
+        _one_euro_smooth(raw, fps=fps, min_cutoff=one_euro_min_cutoff, beta=one_euro_beta)
+        if use_one_euro
+        else uniform_filter1d(raw, size=smoothing_window, mode="nearest")
+    )
     velocity_mag = np.abs(np.gradient(smoothed))
 
     # ── 2. Swing start (motion onset) ───────────────────────────────────────

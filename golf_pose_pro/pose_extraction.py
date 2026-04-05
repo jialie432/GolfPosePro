@@ -1,6 +1,7 @@
 """
 pose_extraction.py — MediaPipe Pose Tasks API (mediapipe >= 0.10.14)
 Supports wrist, hip, and shoulder tracking per frame.
+Extracts both x and y coordinates for velocity computation.
 """
 
 import os
@@ -73,6 +74,9 @@ def extract_pose_features(
     visibility_threshold: float = 0.4,
     model_path: str = None,
     progress_callback=None,
+    apply_smoothing: bool = False,
+    smoothing_min_cutoff: float = 1.0,
+    smoothing_beta: float = 0.007,
 ) -> list:
     """
     Extract pose landmarks frame-by-frame using the MediaPipe Tasks API.
@@ -83,9 +87,12 @@ def extract_pose_features(
         visibility_threshold: Landmark visibility threshold (0–1).
         model_path:           Path to .task model file. Defaults to project-root model.
         progress_callback:    Optional callable(frame_idx, total_frames).
+        apply_smoothing:      If True, apply One-Euro filter to landmark coords.
+        smoothing_min_cutoff: One-Euro min_cutoff param (lower = more smoothing).
+        smoothing_beta:       One-Euro beta param (higher = faster adaptation).
 
     Returns:
-        List of dicts [{frame_idx, wrist_y, hip_y?, shoulder_y?}, …]
+        List of dicts [{frame_idx, wrist_x, wrist_y, hip_x?, hip_y?, …}, …]
     """
     if not MP_AVAILABLE:
         raise RuntimeError("mediapipe is not installed. Run: pip install mediapipe")
@@ -110,6 +117,7 @@ def extract_pose_features(
                   if group in LANDMARK_GROUPS}
 
     cap = cv2.VideoCapture(video_path)
+    width       = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
@@ -145,14 +153,18 @@ def extract_pose_features(
             if poses:
                 landmarks = poses[0]  # first detected pose
                 for group, indices in lm_indices.items():
-                    vals = []
+                    x_vals = []
+                    y_vals = []
                     for idx in indices:
                         lm = landmarks[idx]
                         if lm.visibility is None or lm.visibility > visibility_threshold:
-                            vals.append(lm.y * height)
-                    entry[f"{group}_y"] = float(np.mean(vals)) if vals else None
+                            x_vals.append(lm.x * width)
+                            y_vals.append(lm.y * height)
+                    entry[f"{group}_x"] = float(np.mean(x_vals)) if x_vals else None
+                    entry[f"{group}_y"] = float(np.mean(y_vals)) if y_vals else None
             else:
                 for group in track_landmarks:
+                    entry[f"{group}_x"] = None
                     entry[f"{group}_y"] = None
 
             frame_data.append(entry)
@@ -162,6 +174,15 @@ def extract_pose_features(
                 progress_callback(frame_idx, total_frames)
 
     cap.release()
+
+    # Apply One-Euro smoothing if requested
+    if apply_smoothing and frame_data:
+        from .smoothing import smooth_landmarks
+        frame_data = smooth_landmarks(
+            frame_data, fps=fps,
+            min_cutoff=smoothing_min_cutoff, beta=smoothing_beta,
+        )
+
     return frame_data
 
 
