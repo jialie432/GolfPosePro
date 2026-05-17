@@ -303,6 +303,10 @@ def find_peak_velocities(
             peaks[phase] = {"peak_speed": 0.0, "peak_frame": start}
             continue
 
+        if np.all(np.isnan(seg)):
+            peaks[phase] = {"peak_speed": 0.0, "peak_frame": start}
+            continue
+
         peak_local = int(np.nanargmax(seg))
         peaks[phase] = {
             "peak_speed": float(np.nanmax(seg)),

@@ -4,11 +4,20 @@ threejs_component.py — Build self-contained HTML strings for Streamlit embeddi
 Reads HTML templates and injects pose/club/phase data as JSON variables.
 """
 
+import base64
 import json
 from pathlib import Path
 
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+_MODELS_DIR = Path(__file__).parent.parent / "models"
+
+
+def _model_data_url(filename: str) -> str:
+    """Read a local GLB file and return it as a base64 data URL."""
+    path = _MODELS_DIR / filename
+    data = base64.b64encode(path.read_bytes()).decode()
+    return f"data:model/gltf-binary;base64,{data}"
 
 
 def build_3d_viewer_html(
@@ -55,6 +64,7 @@ def build_3d_viewer_html(
             for k, v in dtw_alignment.items()
         })
 
+    html = html.replace("__MODEL_URL__", _model_data_url("Xbot.glb"))
     html = html.replace("__POSE_DATA__", json.dumps(frames_3d))
     html = html.replace("__CLUB_DATA__", json.dumps(club_data))
     html = html.replace("__PHASE_DATA__", json.dumps(phase_data))

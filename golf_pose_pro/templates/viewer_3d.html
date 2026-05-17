@@ -39,11 +39,20 @@
   }
   #label-left { left: 15px; }
   #label-right { right: 15px; }
+
+  /* Loading overlay */
+  #loading {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #4ade80; font-size: 15px; font-weight: 600; letter-spacing: 0.5px;
+    background: rgba(14,17,23,0.85); padding: 12px 24px; border-radius: 8px;
+    border: 1px solid rgba(74,222,128,0.3); pointer-events: none;
+  }
 </style>
 </head>
 <body>
 <div id="container">
   <canvas id="viewer"></canvas>
+  <div id="loading">Loading 3D model…</div>
   <div id="controls">
     <button id="play-btn">Play</button>
     <input id="scrubber" type="range" min="0" max="100" value="0">
@@ -72,6 +81,8 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 // ── Injected data ──
 const poseData = __POSE_DATA__;
@@ -84,19 +95,7 @@ const comparisonClub = __COMPARISON_CLUB__;
 const dtwAlignment = __DTW_ALIGNMENT__;
 
 const TOTAL = poseData.length;
-
-// Skeleton connections (extended from comparison.py)
-const CONNECTIONS = [
-  [11,12],[11,13],[13,15],[12,14],[14,16],  // arms
-  [11,23],[12,24],[23,24],                   // torso
-  [23,25],[24,26],[25,27],[26,28],           // legs
-  [27,29],[28,30],[27,31],[28,32],           // feet
-  [0,1],[1,2],[2,3],[3,7],                   // face right
-  [0,4],[4,5],[5,6],[6,8],                   // face left
-  [9,10],                                    // mouth
-  [15,17],[15,19],[15,21],                   // left hand
-  [16,18],[16,20],[16,22],                   // right hand
-];
+const MODEL_URL = "__MODEL_URL__";
 
 // ── Scene setup ──
 const canvas = document.getElementById('viewer');
@@ -105,14 +104,15 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true 
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(container.clientWidth, container.clientHeight);
 renderer.setClearColor(0x0e1117);
+renderer.shadowMap.enabled = true;
 
 const isComparison = MODE === 'comparison' && comparisonPose && comparisonPose.length > 0;
 
 // Camera & controls
 const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.01, 50);
-camera.position.set(0, -0.5, 2.5);
+camera.position.set(0, 0.5, 3.0);
 const controls = new OrbitControls(camera, canvas);
-controls.target.set(0, -0.3, 0);
+controls.target.set(0, 0.8, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.update();
@@ -121,9 +121,9 @@ controls.update();
 let camera2, controls2;
 if (isComparison) {
   camera2 = new THREE.PerspectiveCamera(50, (container.clientWidth / 2) / container.clientHeight, 0.01, 50);
-  camera2.position.set(0, -0.5, 2.5);
+  camera2.position.set(0, 0.5, 3.0);
   controls2 = new OrbitControls(camera2, canvas);
-  controls2.target.set(0, -0.3, 0);
+  controls2.target.set(0, 0.8, 0);
   controls2.enableDamping = true;
   controls2.dampingFactor = 0.08;
   controls2.update();
@@ -131,47 +131,29 @@ if (isComparison) {
   document.getElementById('label-right').style.display = 'block';
 }
 
-// ── Build scene (shared for single mode, or per-viewport for comparison) ──
-function createSkeletonScene() {
+// ── Scene infrastructure (lights, grid, club, trail) ──
+function createSceneInfrastructure() {
   const scene = new THREE.Scene();
 
   // Lighting
-  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-  dirLight.position.set(2, -3, 4);
+  const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambient);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+  dirLight.position.set(3, 5, 3);
+  dirLight.castShadow = true;
+  dirLight.shadow.mapSize.set(1024, 1024);
   scene.add(dirLight);
+  const fillLight = new THREE.DirectionalLight(0x8080ff, 0.3);
+  fillLight.position.set(-3, 2, -2);
+  scene.add(fillLight);
 
-  // Ground grid
-  const grid = new THREE.GridHelper(4, 20, 0x334155, 0x1e293b);
-  grid.rotation.x = 0; // grid on XZ plane
+  // Ground grid (Y-position adjusted after model loads to align with feet)
+  const grid = new THREE.GridHelper(6, 30, 0x334155, 0x1e293b);
   scene.add(grid);
-
-  // Joint spheres (33 landmarks)
-  const jointGeo = new THREE.SphereGeometry(0.015, 8, 8);
-  const joints = [];
-  for (let i = 0; i < 33; i++) {
-    const mesh = new THREE.Mesh(jointGeo, new THREE.MeshPhongMaterial({ color: 0x4ade80 }));
-    mesh.visible = false;
-    scene.add(mesh);
-    joints.push(mesh);
-  }
-
-  // Bone lines
-  const boneMaterials = [];
-  const boneLines = [];
-  for (const [a, b] of CONNECTIONS) {
-    const mat = new THREE.LineBasicMaterial({ color: 0x4ade80, linewidth: 2 });
-    const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-    const line = new THREE.Line(geo, mat);
-    line.visible = false;
-    scene.add(line);
-    boneLines.push({ line, a, b });
-    boneMaterials.push(mat);
-  }
 
   // Club shaft
   const shaftGeo = new THREE.CylinderGeometry(0.008, 0.008, 1, 8);
-  shaftGeo.translate(0, 0.5, 0); // pivot at base
+  shaftGeo.translate(0, 0.5, 0);
   const shaftMat = new THREE.MeshPhongMaterial({ color: 0xc0c0c0 });
   const shaft = new THREE.Mesh(shaftGeo, shaftMat);
   shaft.visible = false;
@@ -190,84 +172,264 @@ function createSkeletonScene() {
   const trailGeo = new THREE.BufferGeometry();
   trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
   trailGeo.setDrawRange(0, 0);
-  const trailMat = new THREE.LineBasicMaterial({ color: 0xfb5607, transparent: true, opacity: 0.6 });
+  const trailMat = new THREE.LineBasicMaterial({ color: 0xfb5607, transparent: true, opacity: 0.7 });
   const trail = new THREE.Line(trailGeo, trailMat);
   scene.add(trail);
 
-  return { scene, joints, boneLines, boneMaterials, shaft, clubhead, trail, trailPositions, trailCount: 0, trailMax };
+  return {
+    scene,
+    soldierModel: null,
+    soldierBones: {},
+    hipRestY: 0,
+    grid,
+    shaft, clubhead, trail, trailPositions,
+    trailCount: 0, trailMax,
+  };
 }
 
-const mainScene = createSkeletonScene();
+const mainScene = createSceneInfrastructure();
 let compScene = null;
-if (isComparison) {
-  compScene = createSkeletonScene();
+if (isComparison) compScene = createSceneInfrastructure();
+
+// ── Bone retargeting data (populated once after GLB load) ──
+const restAxis = {};    // boneName → Vector3 (world rest direction bone→firstChild)
+const restWorldQ = {};  // boneName → Quaternion (bone world quaternion at rest)
+
+// Auto-detected Mixamo bone prefix ('mixamorig:' or 'mixamorig' etc.)
+let MIXAMO_PREFIX = 'mixamorig:';
+// Helper: resolve full bone name from short suffix
+function B(suffix) { return MIXAMO_PREFIX + suffix; }
+
+function cacheRestData(model) {
+  model.updateMatrixWorld(true);
+  model.traverse(obj => {
+    if (!obj.isBone || restAxis[obj.name]) return; // only cache once
+    const wq = new THREE.Quaternion();
+    obj.getWorldQuaternion(wq);
+    restWorldQ[obj.name] = wq.clone();
+
+    const boneKids = obj.children.filter(c => c.isBone);
+    if (boneKids.length > 0) {
+      const bp = new THREE.Vector3(), cp = new THREE.Vector3();
+      obj.getWorldPosition(bp);
+      boneKids[0].getWorldPosition(cp);
+      const d = cp.clone().sub(bp);
+      restAxis[obj.name] = d.lengthSq() > 1e-10 ? d.normalize() : new THREE.Vector3(0, 1, 0);
+    } else {
+      restAxis[obj.name] = new THREE.Vector3(0, 1, 0);
+    }
+  });
 }
 
-// ── Update functions ──
+function buildBoneMap(model) {
+  const bones = {};
+  model.traverse(obj => { if (obj.isBone) bones[obj.name] = obj; });
+  return bones;
+}
+
+// Apply a world-space quaternion to a bone (converts to local space)
+function setBoneWorldQ(bone, worldQ) {
+  const parentWorldQ = new THREE.Quaternion();
+  if (bone.parent) bone.parent.getWorldQuaternion(parentWorldQ);
+  bone.quaternion.copy(parentWorldQ.clone().invert().multiply(worldQ));
+}
+
+// Drive a bone so it points from fromDir toward toDir (targetDir = to - from)
+function driveBone(bones, boneName, targetDir) {
+  const bone = bones[boneName];
+  const rAxis = restAxis[boneName];
+  const rWorldQ = restWorldQ[boneName];
+  if (!bone || !rAxis || !rWorldQ || targetDir.lengthSq() < 1e-8) return;
+
+  const td = targetDir.clone().normalize();
+  // Rotate restAxis → td in world space, applied on top of rest world quaternion
+  const R = new THREE.Quaternion().setFromUnitVectors(rAxis, td);
+  const desiredWorldQ = rWorldQ.clone().premultiply(R); // R * rWorldQ
+  setBoneWorldQ(bone, desiredWorldQ);
+  bone.updateMatrix(); // sync matrix from new quaternion (handles matrixAutoUpdate=false)
+  bone.updateMatrixWorld(true);
+}
+
+// ── Load Soldier.glb ──
+const loader = new GLTFLoader();
+loader.load(
+  MODEL_URL,
+  (gltf) => {
+    const originalScene = gltf.scene;
+
+    // Rotate 180° around Y so the model's left/right axes align with
+    // MediaPipe world space (MediaPipe X+ = subject's right; Xbot X+ = model's left).
+    originalScene.rotation.y = Math.PI;
+
+    // Enable shadows on all meshes
+    originalScene.traverse(obj => {
+      if (obj.isMesh || obj.isSkinnedMesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+
+    // Auto-detect Mixamo bone naming prefix ('mixamorig:Hips' vs 'mixamorigHips' etc.)
+    originalScene.traverse(obj => {
+      if (!obj.isBone) return;
+      const hipsIdx = obj.name.indexOf('Hips');
+      if (hipsIdx >= 0) MIXAMO_PREFIX = obj.name.slice(0, hipsIdx);
+    });
+
+    // Cache rest pose data after rotation so axes already match MediaPipe space.
+    cacheRestData(originalScene);
+
+    // Hip rest Y offset (world Y of Hips bone in rest pose)
+    let hipRestY = 0;
+    originalScene.traverse(obj => {
+      if (obj.isBone && obj.name === B('Hips')) {
+        const p = new THREE.Vector3();
+        obj.getWorldPosition(p);
+        hipRestY = p.y;
+      }
+    });
+
+    // Set up main scene model
+    mainScene.soldierModel = originalScene;
+    mainScene.soldierBones = buildBoneMap(originalScene);
+    mainScene.hipRestY = hipRestY;
+    mainScene.grid.position.y = -hipRestY; // align grid with model feet
+    mainScene.scene.add(originalScene);
+
+    // Set up comparison scene model (independent clone)
+    if (compScene) {
+      const clone = SkeletonUtils.clone(originalScene);
+      clone.traverse(obj => {
+        if (obj.isMesh || obj.isSkinnedMesh) {
+          obj.castShadow = true;
+          obj.receiveShadow = true;
+          // Clone material so phase color is independent
+          if (obj.material) obj.material = obj.material.clone();
+        }
+      });
+      compScene.soldierModel = clone;
+      compScene.soldierBones = buildBoneMap(clone);
+      compScene.hipRestY = hipRestY;
+      compScene.grid.position.y = -hipRestY;
+      compScene.scene.add(clone);
+    }
+
+    document.getElementById('loading').style.display = 'none';
+    animate(performance.now());
+  },
+  undefined,
+  (err) => {
+    console.error('Soldier.glb load error:', err);
+    document.getElementById('loading').textContent = 'Failed to load 3D model.';
+  }
+);
+
+// ── Landmark helpers ──
+function getLM(landmarks, idx) {
+  const l = landmarks.find(l => l.idx === idx);
+  return (l && l.x !== null) ? new THREE.Vector3(l.x, -l.y, -l.z) : null;
+}
+
+function avgPts(...pts) {
+  const valid = pts.filter(Boolean);
+  if (!valid.length) return null;
+  const s = new THREE.Vector3();
+  valid.forEach(p => s.add(p));
+  return s.divideScalar(valid.length);
+}
+
+function lerpPts(a, b, t) {
+  return (a && b) ? a.clone().lerp(b, t) : null;
+}
+
+// ── Update skeleton (Soldier model driven by landmarks) ──
 function updateSkeleton(sceneObj, frameData, clubFrame) {
-  const landmarks = frameData.landmarks || [];
+  if (!sceneObj.soldierModel) return;
 
-  // Update joints
-  for (let i = 0; i < 33; i++) {
-    const lm = landmarks.find(l => l.idx === i);
-    if (lm && lm.x !== null) {
-      // MediaPipe world coords: x=right, y=down, z=toward camera
-      // Three.js: x=right, y=up, z=toward camera
-      sceneObj.joints[i].position.set(lm.x, -lm.y, -lm.z);
-      sceneObj.joints[i].visible = true;
-    } else {
-      sceneObj.joints[i].visible = false;
-    }
+  const lms = frameData.landmarks || [];
+  const lm = i => getLM(lms, i);
+
+  const bones = sceneObj.soldierBones;
+  const model = sceneObj.soldierModel;
+
+  // Key landmark positions (THREE.js Y-up space)
+  const lm0  = lm(0);
+  const lm9  = lm(9),  lm10 = lm(10);
+  const lm11 = lm(11), lm12 = lm(12);
+  const lm13 = lm(13), lm14 = lm(14);
+  const lm15 = lm(15), lm16 = lm(16);
+  const lm23 = lm(23), lm24 = lm(24);
+  const lm25 = lm(25), lm26 = lm(26);
+  const lm27 = lm(27), lm28 = lm(28);
+  const lm31 = lm(31), lm32 = lm(32);
+
+  const hipCtr      = avgPts(lm23, lm24);
+  const shoulderCtr = avgPts(lm11, lm12);
+  const mouthCtr    = avgPts(lm9, lm10);
+
+  // Position model root so hip bone aligns with MediaPipe hip center
+  if (hipCtr) {
+    model.position.set(hipCtr.x, hipCtr.y - sceneObj.hipRestY, hipCtr.z);
+    model.updateMatrixWorld(true);
   }
 
-  // Update bones
-  for (const bone of sceneObj.boneLines) {
-    const ja = sceneObj.joints[bone.a];
-    const jb = sceneObj.joints[bone.b];
-    if (ja.visible && jb.visible) {
-      const positions = bone.line.geometry.attributes.position;
-      positions.setXYZ(0, ja.position.x, ja.position.y, ja.position.z);
-      positions.setXYZ(1, jb.position.x, jb.position.y, jb.position.z);
-      positions.needsUpdate = true;
-      bone.line.visible = true;
-    } else {
-      bone.line.visible = false;
-    }
-  }
+  // Spine (interpolate along hip→shoulder axis)
+  const sp1 = lerpPts(hipCtr, shoulderCtr, 0.33);
+  const sp2 = lerpPts(hipCtr, shoulderCtr, 0.66);
 
-  // Update club
+  const drive = (name, from, to) => {
+    if (from && to) driveBone(bones, name, to.clone().sub(from));
+  };
+
+  // Spine chain (parent → child order is critical)
+  drive(B('Spine'),  hipCtr,      sp1);
+  drive(B('Spine1'), sp1,         sp2);
+  drive(B('Spine2'), sp2,         shoulderCtr);
+  // Head/neck
+  drive(B('Neck'),   shoulderCtr, mouthCtr);
+  drive(B('Head'),   mouthCtr,    lm0);
+  // Left arm chain
+  drive(B('LeftShoulder'),  shoulderCtr, lm11);
+  drive(B('LeftArm'),       lm11,        lm13);
+  drive(B('LeftForeArm'),   lm13,        lm15);
+  // Right arm chain
+  drive(B('RightShoulder'), shoulderCtr, lm12);
+  drive(B('RightArm'),      lm12,        lm14);
+  drive(B('RightForeArm'),  lm14,        lm16);
+  // Left leg chain
+  drive(B('LeftUpLeg'), lm23, lm25);
+  drive(B('LeftLeg'),   lm25, lm27);
+  drive(B('LeftFoot'),  lm27, lm31);
+  // Right leg chain
+  drive(B('RightUpLeg'), lm24, lm26);
+  drive(B('RightLeg'),   lm26, lm28);
+  drive(B('RightFoot'),  lm28, lm32);
+
+  // Club shaft + head + swing trail (unchanged from original)
   if (clubFrame && clubFrame.has_club && clubFrame.grip && clubFrame.shaft_end) {
     const grip = new THREE.Vector3(clubFrame.grip.x, -clubFrame.grip.y, -clubFrame.grip.z);
-    const end = new THREE.Vector3(clubFrame.shaft_end.x, -clubFrame.shaft_end.y, -clubFrame.shaft_end.z);
-    const dir = new THREE.Vector3().subVectors(end, grip);
-    const len = dir.length();
+    const end  = new THREE.Vector3(clubFrame.shaft_end.x, -clubFrame.shaft_end.y, -clubFrame.shaft_end.z);
+    const dir  = new THREE.Vector3().subVectors(end, grip);
+    const len  = dir.length();
 
     sceneObj.shaft.position.copy(grip);
     sceneObj.shaft.scale.set(1, len, 1);
-    sceneObj.shaft.quaternion.setFromUnitVectors(
-      new THREE.Vector3(0, 1, 0), dir.normalize()
-    );
+    sceneObj.shaft.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
     sceneObj.shaft.visible = true;
 
     sceneObj.clubhead.position.copy(end);
     sceneObj.clubhead.visible = true;
 
-    // Update trail
+    // Trail
     const tp = sceneObj.trailPositions;
-    const idx = Math.min(sceneObj.trailCount, sceneObj.trailMax - 1);
     if (sceneObj.trailCount < sceneObj.trailMax) {
-      tp[idx * 3] = end.x;
-      tp[idx * 3 + 1] = end.y;
-      tp[idx * 3 + 2] = end.z;
+      const idx = sceneObj.trailCount;
+      tp[idx * 3] = end.x; tp[idx * 3 + 1] = end.y; tp[idx * 3 + 2] = end.z;
       sceneObj.trailCount++;
     } else {
-      // Shift trail points
-      for (let i = 0; i < (sceneObj.trailMax - 1) * 3; i++) {
-        tp[i] = tp[i + 3];
-      }
-      tp[(sceneObj.trailMax - 1) * 3] = end.x;
-      tp[(sceneObj.trailMax - 1) * 3 + 1] = end.y;
-      tp[(sceneObj.trailMax - 1) * 3 + 2] = end.z;
+      for (let i = 0; i < (sceneObj.trailMax - 1) * 3; i++) tp[i] = tp[i + 3];
+      const last = (sceneObj.trailMax - 1) * 3;
+      tp[last] = end.x; tp[last + 1] = end.y; tp[last + 2] = end.z;
     }
     sceneObj.trail.geometry.attributes.position.needsUpdate = true;
     sceneObj.trail.geometry.setDrawRange(0, Math.min(sceneObj.trailCount, sceneObj.trailMax));
@@ -275,10 +437,16 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
     sceneObj.shaft.visible = false;
     sceneObj.clubhead.visible = false;
   }
+
+  // Push driven bone matrices into SkinnedMesh GPU skinning buffers
+  model.traverse(obj => {
+    if (obj.isSkinnedMesh) obj.skeleton.update();
+  });
 }
 
+// ── Phase color → tint Soldier's SkinnedMesh materials ──
 function applyPhaseColor(sceneObj, frameIdx) {
-  let phaseColor = 0x4ade80; // default green
+  let phaseColor = 0x4ade80;
   for (const [phase, range] of Object.entries(phaseData)) {
     if (frameIdx >= range.start && frameIdx <= range.end) {
       phaseColor = parseInt((phaseColors[phase] || '#4ade80').replace('#', ''), 16);
@@ -289,39 +457,37 @@ function applyPhaseColor(sceneObj, frameIdx) {
       break;
     }
   }
-  for (const j of sceneObj.joints) {
-    j.material.color.setHex(phaseColor);
-  }
-  for (const bm of sceneObj.boneMaterials) {
-    bm.color.setHex(phaseColor);
+  if (sceneObj.soldierModel) {
+    sceneObj.soldierModel.traverse(obj => {
+      if ((obj.isMesh || obj.isSkinnedMesh) && obj.material) {
+        obj.material.color.setHex(phaseColor);
+      }
+    });
   }
 }
 
 // Map student frame to pro frame via DTW alignment
 function getComparisonFrame(studentFrameIdx) {
   if (dtwAlignment && typeof dtwAlignment === 'object') {
-    // Find which phase the student frame is in, use DTW-aligned pro frame
     for (const [phase, alignment] of Object.entries(dtwAlignment)) {
       const pRange = phaseData[phase];
       if (pRange && studentFrameIdx >= pRange.start && studentFrameIdx <= pRange.end) {
-        // Linear interpolation within phase
         const t = (pRange.end > pRange.start)
           ? (studentFrameIdx - pRange.start) / (pRange.end - pRange.start) : 0;
-        const proIdx = Math.round(alignment[1] + t * (alignment[1] - alignment[1]));
+        const proIdx = Math.round(alignment[0] + t * (alignment[1] - alignment[0]));
         return Math.min(Math.max(proIdx, 0), comparisonPose.length - 1);
       }
     }
   }
-  // Fallback: proportional mapping
   const ratio = studentFrameIdx / Math.max(TOTAL - 1, 1);
   return Math.min(Math.round(ratio * (comparisonPose.length - 1)), comparisonPose.length - 1);
 }
 
 // ── Controls ──
-const playBtn = document.getElementById('play-btn');
-const scrubber = document.getElementById('scrubber');
-const frameLabel = document.getElementById('frame-label');
-const phaseBadge = document.getElementById('phase-badge');
+const playBtn     = document.getElementById('play-btn');
+const scrubber    = document.getElementById('scrubber');
+const frameLabel  = document.getElementById('frame-label');
+const phaseBadge  = document.getElementById('phase-badge');
 const speedSelect = document.getElementById('speed-select');
 const resetCamBtn = document.getElementById('reset-cam-btn');
 
@@ -332,7 +498,6 @@ let playbackSpeed = 1.0;
 let lastTime = 0;
 let accumulator = 0;
 
-// Get FPS from first two frames
 const fps = (TOTAL > 1 && poseData[1].timestamp_ms > 0)
   ? 1000 / (poseData[1].timestamp_ms - poseData[0].timestamp_ms) : 30;
 
@@ -353,12 +518,12 @@ speedSelect.addEventListener('change', () => {
 });
 
 resetCamBtn.addEventListener('click', () => {
-  camera.position.set(0, -0.5, 2.5);
-  controls.target.set(0, -0.3, 0);
+  camera.position.set(0, 0.5, 3.0);
+  controls.target.set(0, 0.8, 0);
   controls.update();
   if (camera2) {
-    camera2.position.set(0, -0.5, 2.5);
-    controls2.target.set(0, -0.3, 0);
+    camera2.position.set(0, 0.5, 3.0);
+    controls2.target.set(0, 0.8, 0);
     controls2.update();
   }
 });
@@ -368,7 +533,7 @@ function resetTrail(sceneObj) {
   sceneObj.trail.geometry.setDrawRange(0, 0);
 }
 
-// ── Animation loop ──
+// ── Animation loop (started after GLB loads) ──
 function animate(time) {
   requestAnimationFrame(animate);
 
@@ -385,37 +550,31 @@ function animate(time) {
 
   const fi = Math.floor(currentFrame);
 
-  // Update main skeleton
   updateSkeleton(mainScene, poseData[fi], clubData[fi]);
   applyPhaseColor(mainScene, fi);
 
-  // Update UI
   scrubber.value = fi;
   frameLabel.textContent = `${fi} / ${TOTAL - 1}`;
 
   controls.update();
 
   if (isComparison) {
-    // Split viewport rendering
     const w = container.clientWidth;
     const h = container.clientHeight;
     const halfW = Math.floor(w / 2);
 
-    // Update comparison skeleton
     const compIdx = getComparisonFrame(fi);
     updateSkeleton(compScene, comparisonPose[compIdx], comparisonClub[compIdx]);
     applyPhaseColor(compScene, compIdx);
 
     renderer.setScissorTest(true);
 
-    // Left viewport (student)
     renderer.setViewport(0, 0, halfW, h);
     renderer.setScissor(0, 0, halfW, h);
     camera.aspect = halfW / h;
     camera.updateProjectionMatrix();
     renderer.render(mainScene.scene, camera);
 
-    // Right viewport (pro)
     renderer.setViewport(halfW, 0, w - halfW, h);
     renderer.setScissor(halfW, 0, w - halfW, h);
     camera2.aspect = (w - halfW) / h;
@@ -423,7 +582,6 @@ function animate(time) {
     renderer.render(compScene.scene, camera2);
 
     renderer.setScissorTest(false);
-
     controls2.update();
   } else {
     renderer.render(mainScene.scene, camera);
@@ -440,8 +598,6 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
   }
 });
-
-animate(performance.now());
 </script>
 </body>
 </html>
