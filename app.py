@@ -57,207 +57,354 @@ st.set_page_config(
 
 CUSTOM_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,400&family=Nunito:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'Outfit', sans-serif !important;
+:root {
+    --gold:         #c9943a;
+    --gold-light:   #e8c068;
+    --gold-dim:     rgba(201,148,58,0.12);
+    --gold-border:  rgba(201,148,58,0.18);
+    --gold-border2: rgba(201,148,58,0.32);
+    --text-1: #f2eed8;
+    --text-2: #9aaa95;
+    --text-3: #5e7259;
+    --card:   rgba(255,255,255,0.035);
 }
 
-/* ---- Background ---- */
+html, body, [class*="css"] {
+    font-family: 'Nunito', sans-serif !important;
+}
+
+/* ── Background ── */
 .stApp {
-    background: linear-gradient(135deg, #030712 0%, #0a1628 50%, #061a10 100%);
+    background: radial-gradient(ellipse at 30% 15%, #0e1f14 0%, #080d08 55%, #070a10 100%);
     min-height: 100vh;
 }
 
-/* ---- Sidebar ---- */
+/* ── Sidebar ── */
 [data-testid="stSidebar"] {
-    background: rgba(10, 22, 40, 0.95) !important;
-    border-right: 1px solid rgba(74, 222, 128, 0.15);
+    background: rgba(5,8,5,0.98) !important;
+    border-right: 1px solid var(--gold-border);
 }
-[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+[data-testid="stSidebar"] * { color: var(--text-1) !important; }
 
-/* ---- Hero header ---- */
+.sb-brand {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.35rem;
+    font-weight: 900;
+    color: var(--text-1) !important;
+    letter-spacing: -0.01em;
+}
+.sb-brand em { font-style: italic; color: var(--gold) !important; }
+
+.sb-step {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.65rem 0 0.25rem;
+    margin-top: 0.6rem;
+    border-top: 1px solid rgba(201,148,58,0.1);
+}
+.sb-num {
+    width: 21px;
+    height: 21px;
+    border-radius: 50%;
+    background: var(--gold);
+    color: #050805 !important;
+    font-size: 0.66rem;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.sb-label {
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--gold) !important;
+}
+
+/* ── Hero header ── */
 .hero-header {
-    background: linear-gradient(135deg, rgba(6,26,16,0.9), rgba(10,22,40,0.9));
-    border: 1px solid rgba(74,222,128,0.25);
-    border-radius: 20px;
-    padding: 2rem 2.5rem;
+    background: linear-gradient(140deg, rgba(14,31,20,0.92) 0%, rgba(8,13,8,0.9) 55%, rgba(11,14,22,0.92) 100%);
+    border: 1px solid var(--gold-border2);
+    border-radius: 18px;
+    padding: 2.2rem 2.8rem;
     margin-bottom: 1.5rem;
-    backdrop-filter: blur(20px);
-    box-shadow: 0 0 60px rgba(74,222,128,0.08), 0 20px 60px rgba(0,0,0,0.4);
+    position: relative;
+    overflow: hidden;
+}
+.hero-header::after {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: 3%;
+    width: 380px;
+    height: 380px;
+    background: radial-gradient(circle, rgba(201,148,58,0.07) 0%, transparent 65%);
+    pointer-events: none;
+}
+.hero-eyebrow {
+    font-family: 'Fira Code', monospace;
+    font-size: 0.67rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 0.45rem;
 }
 .hero-title {
-    font-size: 2.8rem;
-    font-weight: 800;
-    background: linear-gradient(135deg, #4ade80, #22d3ee, #4ade80);
-    background-size: 200% 200%;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    animation: shimmer 4s ease infinite;
+    font-family: 'Playfair Display', serif;
+    font-size: 2.75rem;
+    font-weight: 900;
+    color: var(--text-1);
+    line-height: 1.05;
     margin: 0;
-    line-height: 1.1;
 }
+.hero-title em { font-style: italic; color: var(--gold); }
 .hero-sub {
-    color: #94a3b8;
-    font-size: 1.05rem;
-    margin-top: 0.4rem;
-    font-weight: 300;
+    color: var(--text-2);
+    font-size: 0.97rem;
+    margin-top: 0.5rem;
+    font-weight: 400;
+    max-width: 580px;
+    line-height: 1.65;
 }
-@keyframes shimmer {
-    0%   { background-position: 0% 50%; }
-    50%  { background-position: 100% 50%; }
-    100% { background-position: 0% 50%; }
+.hero-pills {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 1.1rem;
+    flex-wrap: wrap;
+}
+.hero-pill {
+    background: var(--gold-dim);
+    border: 1px solid rgba(201,148,58,0.22);
+    border-radius: 100px;
+    padding: 3px 11px;
+    font-size: 0.71rem;
+    font-weight: 600;
+    color: var(--gold-light);
+    letter-spacing: 0.04em;
 }
 
-/* ---- Metric cards ---- */
+/* ── Metric cards ── */
 .metric-card {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(74,222,128,0.18);
+    background: var(--card);
+    border: 1px solid var(--gold-border);
     border-radius: 14px;
-    padding: 1.2rem 1.5rem;
+    padding: 1.25rem 1.4rem;
     text-align: center;
     backdrop-filter: blur(10px);
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
     height: 100%;
 }
 .metric-card:hover {
     transform: translateY(-3px);
-    box-shadow: 0 8px 30px rgba(74,222,128,0.15);
+    border-color: var(--gold-border2);
+    box-shadow: 0 10px 35px rgba(201,148,58,0.12);
 }
 .metric-value {
-    font-size: 2.2rem;
+    font-family: 'Playfair Display', serif;
+    font-size: 2.25rem;
     font-weight: 700;
-    color: #4ade80;
+    color: var(--gold);
     line-height: 1;
 }
 .metric-label {
-    font-size: 0.78rem;
-    color: #64748b;
-    font-weight: 500;
-    letter-spacing: 0.06em;
+    font-family: 'Fira Code', monospace;
+    font-size: 0.62rem;
+    color: var(--text-3);
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    margin-top: 0.3rem;
+    margin-top: 0.35rem;
 }
 .metric-sub {
-    font-size: 0.82rem;
-    color: #94a3b8;
+    font-size: 0.78rem;
+    color: var(--text-2);
     margin-top: 0.2rem;
 }
 
-/* ---- Phase timeline ---- */
+/* ── Phase timeline ── */
 .phase-row {
     display: flex;
-    border-radius: 10px;
+    border-radius: 8px;
     overflow: hidden;
-    height: 28px;
-    margin: 0.6rem 0;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+    height: 30px;
+    margin: 0.7rem 0 0.4rem;
+    box-shadow: 0 2px 14px rgba(0,0,0,0.4);
 }
 .phase-seg {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.62rem;
-    font-weight: 600;
+    font-family: 'Fira Code', monospace;
+    font-size: 0.58rem;
+    font-weight: 500;
     letter-spacing: 0.04em;
-    color: rgba(255,255,255,0.9);
+    color: rgba(255,255,255,0.92);
     overflow: hidden;
     white-space: nowrap;
-    text-shadow: 0 1px 2px rgba(0,0,0,0.5);
-    transition: flex 0.5s ease;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.55);
+}
+.phase-legend {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-top: 0.4rem;
+}
+.phase-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.32rem;
+    font-family: 'Fira Code', monospace;
+    font-size: 0.67rem;
+    color: var(--text-2);
+}
+.phase-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
 }
 
-/* ---- Section cards ---- */
+/* ── Section cards & titles ── */
 .section-card {
-    background: rgba(255,255,255,0.025);
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 16px;
+    background: rgba(255,255,255,0.022);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 14px;
     padding: 1.4rem 1.6rem;
     margin-bottom: 1rem;
 }
 .section-title {
-    font-size: 1.05rem;
-    font-weight: 600;
-    color: #e2e8f0;
-    margin-bottom: 0.8rem;
+    font-family: 'Playfair Display', serif;
+    font-size: 1.08rem;
+    font-weight: 700;
+    color: var(--text-1);
+    margin-bottom: 0.75rem;
     display: flex;
     align-items: center;
     gap: 0.5rem;
 }
 
-/* ---- Buttons ---- */
+/* ── Buttons ── */
 .stButton > button {
-    background: linear-gradient(135deg, #16a34a, #15803d) !important;
-    color: white !important;
+    background: linear-gradient(135deg, #c9943a, #9d7228) !important;
+    color: #050805 !important;
     border: none !important;
-    border-radius: 10px !important;
-    font-family: 'Outfit', sans-serif !important;
-    font-weight: 600 !important;
-    padding: 0.55rem 1.4rem !important;
-    transition: all 0.2s ease !important;
-    box-shadow: 0 4px 15px rgba(22,163,74,0.3) !important;
-    letter-spacing: 0.02em !important;
+    border-radius: 9px !important;
+    font-family: 'Nunito', sans-serif !important;
+    font-weight: 800 !important;
+    padding: 0.6rem 1.5rem !important;
+    transition: all 0.2s !important;
+    box-shadow: 0 4px 16px rgba(201,148,58,0.3) !important;
+    letter-spacing: 0.04em !important;
+    font-size: 0.9rem !important;
 }
 .stButton > button:hover {
     transform: translateY(-2px) !important;
-    box-shadow: 0 8px 25px rgba(22,163,74,0.45) !important;
-    background: linear-gradient(135deg, #22c55e, #16a34a) !important;
+    box-shadow: 0 8px 28px rgba(201,148,58,0.44) !important;
+    background: linear-gradient(135deg, #e8c068, #c9943a) !important;
 }
 .stDownloadButton > button {
-    background: rgba(71,85,105,0.5) !important;
-    border: 1px solid rgba(148,163,184,0.25) !important;
-    color: #e2e8f0 !important;
+    background: rgba(40,52,40,0.45) !important;
+    border: 1px solid rgba(201,148,58,0.2) !important;
+    color: var(--text-1) !important;
     border-radius: 8px !important;
-    font-family: 'Outfit', sans-serif !important;
-    font-weight: 500 !important;
-}
-
-/* ---- Tabs ---- */
-.stTabs [role="tablist"] {
-    background: rgba(255,255,255,0.03);
-    border-radius: 12px;
-    padding: 4px;
-    border: 1px solid rgba(255,255,255,0.06);
-}
-.stTabs [role="tab"] {
-    border-radius: 9px;
-    color: #64748b !important;
-    font-family: 'Outfit', sans-serif !important;
-    font-weight: 500 !important;
-    transition: all 0.2s !important;
-}
-.stTabs [role="tab"][aria-selected="true"] {
-    background: rgba(74,222,128,0.12) !important;
-    color: #4ade80 !important;
+    font-family: 'Nunito', sans-serif !important;
     font-weight: 600 !important;
 }
 
-/* ---- Progress ---- */
+/* ── Tabs ── */
+.stTabs [role="tablist"] {
+    background: rgba(255,255,255,0.02);
+    border-radius: 10px;
+    padding: 3px;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+.stTabs [role="tab"] {
+    border-radius: 7px;
+    color: var(--text-3) !important;
+    font-family: 'Nunito', sans-serif !important;
+    font-weight: 600 !important;
+    font-size: 0.86rem !important;
+    transition: all 0.2s !important;
+}
+.stTabs [role="tab"][aria-selected="true"] {
+    background: var(--gold-dim) !important;
+    color: var(--gold) !important;
+}
+
+/* ── Progress ── */
 .stProgress > div > div {
-    background: linear-gradient(90deg, #16a34a, #4ade80) !important;
+    background: linear-gradient(90deg, #9d7228, #e8c068) !important;
     border-radius: 4px !important;
 }
 
-/* ---- Info / Alerts ---- */
+/* ── Alerts ── */
 .stAlert {
-    background: rgba(255,255,255,0.04) !important;
+    background: rgba(255,255,255,0.03) !important;
     border-radius: 10px !important;
 }
 
-/* ---- Inputs ---- */
-.stSlider > div > div > div { background: #16a34a !important; }
+/* ── Inputs ── */
+.stSlider > div > div > div { background: var(--gold) !important; }
 .stSelectbox div[data-baseweb], .stMultiSelect div[data-baseweb] {
-    background: rgba(255,255,255,0.04) !important;
-    border-color: rgba(74,222,128,0.2) !important;
+    background: rgba(255,255,255,0.03) !important;
+    border-color: var(--gold-border) !important;
 }
 
-/* ---- Divider ---- */
+/* ── Divider ── */
 hr { border-color: rgba(255,255,255,0.06) !important; }
 
-/* ---- Scrollbar ---- */
-::-webkit-scrollbar { width: 6px; }
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(74,222,128,0.3); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: rgba(201,148,58,0.22); border-radius: 3px; }
+
+/* ── Welcome state ── */
+.welcome-wrap {
+    max-width: 680px;
+    margin: 1.5rem auto;
+    text-align: center;
+}
+.welcome-icon { font-size: 3.5rem; line-height: 1; margin-bottom: 0.8rem; }
+.welcome-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 2rem;
+    font-weight: 900;
+    color: var(--text-1);
+    margin-bottom: 0.4rem;
+}
+.welcome-sub {
+    color: var(--text-2);
+    font-size: 0.95rem;
+    line-height: 1.65;
+    margin-bottom: 2rem;
+}
+.welcome-steps {
+    display: grid;
+    grid-template-columns: repeat(3,1fr);
+    gap: 1rem;
+    text-align: left;
+}
+.w-step {
+    background: rgba(255,255,255,0.025);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 1.1rem 1.15rem;
+}
+.w-step-num {
+    font-family: 'Fira Code', monospace;
+    font-size: 0.63rem;
+    letter-spacing: 0.1em;
+    color: var(--gold);
+    text-transform: uppercase;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+}
+.w-step-title { font-weight: 700; font-size: 0.9rem; color: var(--text-1); margin-bottom: 0.22rem; }
+.w-step-desc  { font-size: 0.8rem; color: var(--text-2); line-height: 1.5; }
 </style>
 """
 
@@ -295,8 +442,9 @@ def _fig_to_bytes(fig: plt.Figure) -> bytes:
 
 
 def _phase_timeline_html(phase_ranges: dict, total_frames: int) -> str:
-    """Build an HTML phase-timeline bar."""
+    """Build an HTML phase-timeline bar with a color legend."""
     segs = ""
+    legend = ""
     for phase, (s, e) in phase_ranges.items():
         pct   = max(1.0, (e - s) / total_frames * 100)
         color = PHASE_COLORS.get(phase, "#888")
@@ -304,7 +452,15 @@ def _phase_timeline_html(phase_ranges: dict, total_frames: int) -> str:
             f'<div class="phase-seg" style="flex:{pct:.2f};background:{color};">'
             f'{phase}</div>'
         )
-    return f'<div class="phase-row">{segs}</div>'
+        legend += (
+            f'<span class="phase-legend-item">'
+            f'<span class="phase-dot" style="background:{color};"></span>'
+            f'{phase}</span>'
+        )
+    return (
+        f'<div class="phase-row">{segs}</div>'
+        f'<div class="phase-legend">{legend}</div>'
+    )
 
 
 def _metric_card(value, label, sub="") -> str:
@@ -330,19 +486,32 @@ def _section_title(icon: str, title: str) -> str:
 # ────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("## ⛳ GolfPosePro")
+    st.markdown('<p class="sb-brand">Golf<em>Pose</em>Pro ⛳</p>', unsafe_allow_html=True)
     st.markdown("---")
 
-    st.markdown("### 📁 Video Inputs")
-
+    # ── Step 1 ────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="sb-step"><span class="sb-num">1</span>'
+        '<span class="sb-label">Upload Your Swing</span></div>',
+        unsafe_allow_html=True,
+    )
     student_file = st.file_uploader(
-        "Your Swing (student)",
+        "Your swing video",
         type=["mp4", "mov", "MP4", "MOV"],
-        help="Upload your golf swing video.",
+        help="Record yourself hitting a shot and upload it here.",
         key="student_upload",
+        label_visibility="collapsed",
+    )
+    if student_file:
+        st.success("✓ Swing video loaded", icon=None)
+
+    # ── Step 2 ────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="sb-step"><span class="sb-num">2</span>'
+        '<span class="sb-label">Pick a Pro to Compare</span></div>',
+        unsafe_allow_html=True,
     )
 
-    # Built-in pro references
     PROJ_DIR  = Path(__file__).parent
     BUILTIN   = {}
     for name, path in [
@@ -353,9 +522,10 @@ with st.sidebar:
             BUILTIN[name] = str(path)
 
     pro_source = st.radio(
-        "Pro Reference",
-        ["Upload custom", "Use built-in"],
+        "Pro reference source",
+        ["Use built-in pro", "Upload custom"],
         horizontal=True,
+        label_visibility="collapsed",
     )
 
     pro_file = None
@@ -363,72 +533,63 @@ with st.sidebar:
 
     if pro_source == "Upload custom":
         pro_file = st.file_uploader(
-            "Pro Reference Video",
+            "Upload pro reference",
             type=["mp4", "mov", "MP4", "MOV"],
             key="pro_upload",
         )
     elif BUILTIN:
-        chosen_pro = st.selectbox("Choose built-in pro", list(BUILTIN.keys()))
+        chosen_pro = st.selectbox("Choose a pro golfer", list(BUILTIN.keys()))
         builtin_pro_path = BUILTIN[chosen_pro]
+        st.caption("Built-in reference loaded. You can skip pro comparison too.")
     else:
         st.warning("No built-in pro videos found.")
 
-    st.markdown("---")
-    st.markdown("### ⚙️ Analysis Settings")
-
-    track_options = st.multiselect(
-        "Track landmarks",
-        ["wrist", "hip", "shoulder"],
-        default=["wrist"],
-        help="Select which body landmarks to track.",
+    # ── Step 3 ────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="sb-step"><span class="sb-num">3</span>'
+        '<span class="sb-label">Analyze</span></div>',
+        unsafe_allow_html=True,
     )
-    if not track_options:
-        track_options = ["wrist"]
+    analyze_btn = st.button("⚡ Analyze Swing", use_container_width=True)
 
-    smoothing = st.slider("Smoothing window", 3, 20, 5, 1,
-                          help="Bigger = smoother trajectory, less sensitive.")
-    threshold_pct = st.slider("Motion threshold (%ile)", 70, 99, 90, 1,
-                              help="Higher = only stronger motions trigger phase start.")
-
-    st.markdown("---")
-    st.markdown("### 🎬 Video Settings")
-
-    slow_factor = st.slider(
-        "Slow-motion factor",
-        1.0, 4.0, 2.0, 0.5,
-        help="How much to slow down the swing segment in the debug video.",
-    )
-    show_pose = st.checkbox("Show pose skeleton in comparison", value=True)
-    use_dtw   = st.checkbox("Use DTW-aligned frame matching", value=True,
-                            help="Use Dynamic Time Warping to match corresponding "
-                                 "frames between student and pro.")
-
-    st.markdown("---")
-    st.markdown("### 🎯 Smoothing & Kinematics")
-
-    use_one_euro = st.checkbox(
-        "Use adaptive smoothing (One-Euro Filter)",
-        value=True,
-        help="Adaptive low-pass filter: heavy smoothing for slow motion, "
-             "light smoothing for fast motion. Reduces landmark jitter.",
-    )
-
-    if use_one_euro:
-        oe_min_cutoff = st.slider(
-            "Min cutoff (smoothness)", 0.3, 5.0, 1.0, 0.1,
-            help="Lower = more smoothing for slow signals. Typical: 0.5–3.0.",
+    # ── Advanced settings (collapsed) ─────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("⚙️ Advanced Settings", expanded=False):
+        st.markdown("**Landmark Tracking**")
+        track_options = st.multiselect(
+            "Track landmarks",
+            ["wrist", "hip", "shoulder"],
+            default=["wrist"],
+            help="Wrist is primary. Add hip/shoulder for multi-landmark overlay.",
         )
-        oe_beta = st.slider(
-            "Beta (speed adaptation)", 0.0, 0.1, 0.007, 0.001,
-            help="Higher = cutoff adapts faster to speed changes. Typical: 0.001–0.05.",
-            format="%.3f",
-        )
-    else:
-        oe_min_cutoff = 1.0
-        oe_beta = 0.007
+        if not track_options:
+            track_options = ["wrist"]
 
-    st.markdown("---")
-    analyze_btn = st.button("🚀 Run Analysis", use_container_width=True)
+        st.markdown("**Phase Detection**")
+        smoothing = st.slider("Smoothing window", 3, 20, 5, 1,
+                              help="Bigger = smoother trajectory, less reactive to noise.")
+        threshold_pct = st.slider("Motion threshold (%ile)", 70, 99, 90, 1,
+                                  help="Higher = only stronger motions define phase boundaries.")
+
+        st.markdown("**Debug Video**")
+        slow_factor = st.slider("Slow-motion factor", 1.0, 4.0, 2.0, 0.5,
+                                help="Multiplier applied to the swing window in the debug video.")
+        show_pose = st.checkbox("Show skeleton overlay in comparison", value=True)
+        use_dtw   = st.checkbox("Use DTW frame matching", value=True,
+                                help="Dynamic Time Warping aligns student/pro phases for fair comparison.")
+
+        st.markdown("**Adaptive Smoothing**")
+        use_one_euro = st.checkbox("One-Euro Filter", value=True,
+                                   help="Reduces jitter: heavy smoothing for slow motion, light for fast.")
+        if use_one_euro:
+            oe_min_cutoff = st.slider("Min cutoff", 0.3, 5.0, 1.0, 0.1,
+                                      help="Lower = more smoothing. Typical 0.5–3.0.")
+            oe_beta = st.slider("Beta", 0.0, 0.1, 0.007, 0.001,
+                                help="Cutoff adaptation speed. Typical 0.001–0.05.",
+                                format="%.3f")
+        else:
+            oe_min_cutoff = 1.0
+            oe_beta = 0.007
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -437,11 +598,19 @@ with st.sidebar:
 
 st.markdown("""
 <div class="hero-header">
-  <p class="hero-title">⛳ GolfPosePro</p>
+  <div class="hero-eyebrow">AI-Powered Golf Swing Analysis</div>
+  <h1 class="hero-title">Golf<em>Pose</em>Pro</h1>
   <p class="hero-sub">
-    AI-powered golf swing analyzer · Pose tracking · Phase detection ·
-    Pro comparison · DTW alignment
+    Upload your swing, compare against a professional, and get instant
+    biomechanical feedback — powered by MediaPipe AI and Dynamic Time Warping.
   </p>
+  <div class="hero-pills">
+    <span class="hero-pill">⚡ Phase Detection</span>
+    <span class="hero-pill">📐 DTW Alignment</span>
+    <span class="hero-pill">🎯 3D Kinematics</span>
+    <span class="hero-pill">📹 Live Tracking</span>
+    <span class="hero-pill">📊 Export Data</span>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -759,22 +928,31 @@ if analyze_btn:
 R = st.session_state.get("results")
 
 if R is None:
-    # Welcome state
     st.markdown("""
-    <div class="section-card" style="text-align:center;padding:3rem;">
-        <div style="font-size:4rem;margin-bottom:1rem;">⛳</div>
-        <h2 style="color:#e2e8f0;margin-bottom:0.5rem;">Welcome to GolfPosePro</h2>
-        <p style="color:#64748b;max-width:500px;margin:auto;line-height:1.7;">
-            Upload your golf swing video in the sidebar, configure analysis settings,
-            and click <strong style="color:#4ade80">Run Analysis</strong> to get started.
-        </p>
-        <div style="display:flex;gap:1.5rem;justify-content:center;margin-top:2rem;flex-wrap:wrap;">
-            <div style="color:#4ade80;font-size:0.85rem;">🧠 MediaPipe Pose</div>
-            <div style="color:#38bdf8;font-size:0.85rem;">📐 DTW Alignment</div>
-            <div style="color:#f472b6;font-size:0.85rem;">🦴 Multi-landmark</div>
-            <div style="color:#fb923c;font-size:0.85rem;">🎬 Debug Video</div>
-            <div style="color:#a78bfa;font-size:0.85rem;">📄 CSV / JSON Export</div>
+    <div class="welcome-wrap">
+      <div class="welcome-icon">⛳</div>
+      <h2 class="welcome-title">Analyze Your Golf Swing</h2>
+      <p class="welcome-sub">
+        Compare your swing against touring professionals frame by frame.<br>
+        Get instant biomechanical insights — no golf expertise required.
+      </p>
+      <div class="welcome-steps">
+        <div class="w-step">
+          <div class="w-step-num">Step 01</div>
+          <div class="w-step-title">Upload Your Video</div>
+          <div class="w-step-desc">Film your swing and upload the video using the sidebar on the left.</div>
         </div>
+        <div class="w-step">
+          <div class="w-step-num">Step 02</div>
+          <div class="w-step-title">Choose a Pro</div>
+          <div class="w-step-desc">Pick Max Homa or Ludvig Åberg, or upload your own reference video.</div>
+        </div>
+        <div class="w-step">
+          <div class="w-step-num">Step 03</div>
+          <div class="w-step-title">Hit Analyze</div>
+          <div class="w-step-desc">Click <strong style="color:var(--gold)">Analyze Swing</strong> — results appear in seconds.</div>
+        </div>
+      </div>
     </div>
     """, unsafe_allow_html=True)
     st.stop()
@@ -791,16 +969,20 @@ use_dtw         = R["use_dtw"]
 
 swing_duration  = swing_end_s - swing_start_s
 num_phases      = len(phase_ranges_s)
+video_fps_r     = R.get("video_fps", 30.0) or 30.0
+swing_secs      = swing_duration / max(video_fps_r, 1)
 
 kpi_cols = st.columns(4)
 kpi_data = [
-    (f"{num_phases}", "PHASES DETECTED", "Address → Follow Through"),
-    (f"{swing_duration}", "SWING FRAMES", f"Frames {swing_start_s}–{swing_end_s}"),
-    (f"{total_frames_s}", "TOTAL FRAMES", f"{total_frames_s} analyzed"),
+    (f"{num_phases}", "PHASES", "Address → Follow Through"),
+    (f"{swing_secs:.2f}s", "SWING TIME", f"frames {swing_start_s}–{swing_end_s}"),
+    (f"{total_frames_s}", "TOTAL FRAMES", f"@ {video_fps_r:.0f} fps"),
     (
-        f"{similarity_score:.0f}%" if similarity_score is not None else "N/A",
-        "SWING SIMILARITY",
-        "DTW vs. Pro" if similarity_score is not None else "No pro video",
+        f"{similarity_score:.0f}%",
+        "MATCH SCORE",
+        "DTW vs. pro" if similarity_score is not None else "—",
+    ) if similarity_score is not None else (
+        "—", "MATCH SCORE", "no pro video",
     ),
 ]
 for col, (val, label, sub) in zip(kpi_cols, kpi_data):
@@ -826,14 +1008,14 @@ for phase, (s, e) in phase_ranges_s.items():
     if use_dtw and R["dtw_alignment"] and phase in R["dtw_alignment"]:
         d = R["dtw_alignment"][phase][2]
         if d is not None:
-            dtw_tag = f'<span style="color:#4ade80;font-size:0.7rem">DTW: {d:.1f}</span>'
+            dtw_tag = f'<span style="color:var(--gold-light,#e8c068);font-size:0.7rem;font-family:\'Fira Code\',monospace">DTW: {d:.1f}</span>'
     phase_table_rows += (
         f"<tr>"
-        f"  <td><span style='color:{color};font-weight:600'>{phase}</span></td>"
-        f"  <td style='color:#94a3b8'>{s}</td>"
-        f"  <td style='color:#94a3b8'>{e}</td>"
-        f"  <td style='color:#e2e8f0'>{dur}</td>"
-        f"  <td style='color:#64748b'>{pct:.1f}%</td>"
+        f"  <td><span style='color:{color};font-weight:700'>{phase}</span></td>"
+        f"  <td style='color:#9aaa95;font-family:\"Fira Code\",monospace;font-size:0.82rem'>{s}</td>"
+        f"  <td style='color:#9aaa95;font-family:\"Fira Code\",monospace;font-size:0.82rem'>{e}</td>"
+        f"  <td style='color:#f2eed8;font-family:\"Fira Code\",monospace;font-size:0.82rem'>{dur}</td>"
+        f"  <td style='color:#5e7259;font-family:\"Fira Code\",monospace;font-size:0.82rem'>{pct:.1f}%</td>"
         f"  <td>{dtw_tag}</td>"
         f"</tr>"
     )
@@ -841,13 +1023,13 @@ for phase, (s, e) in phase_ranges_s.items():
 st.markdown(f"""
 <table style="width:100%;border-collapse:collapse;font-size:0.85rem;margin-top:0.5rem;">
   <thead>
-    <tr style="color:#64748b;border-bottom:1px solid rgba(255,255,255,0.08);">
-      <th style="text-align:left;padding:6px 8px">Phase</th>
-      <th style="text-align:left;padding:6px 8px">Start</th>
-      <th style="text-align:left;padding:6px 8px">End</th>
-      <th style="text-align:left;padding:6px 8px">Frames</th>
-      <th style="text-align:left;padding:6px 8px">% of clip</th>
-      <th style="text-align:left;padding:6px 8px">DTW</th>
+    <tr style="color:#5e7259;border-bottom:1px solid rgba(255,255,255,0.07);font-family:'Fira Code',monospace;font-size:0.65rem;letter-spacing:0.08em;text-transform:uppercase;">
+      <th style="text-align:left;padding:7px 8px">Phase</th>
+      <th style="text-align:left;padding:7px 8px">Start</th>
+      <th style="text-align:left;padding:7px 8px">End</th>
+      <th style="text-align:left;padding:7px 8px">Frames</th>
+      <th style="text-align:left;padding:7px 8px">Duration</th>
+      <th style="text-align:left;padding:7px 8px">DTW</th>
     </tr>
   </thead>
   <tbody>
@@ -862,12 +1044,12 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 tab_trajectory, tab_kinematics, tab_comparison, tab_3d, tab_live, tab_video, tab_export = st.tabs([
     "📈 Trajectory",
-    "📐 Kinematics",
-    "🔄 Phase Comparison",
-    "🎯 3D Viewer",
-    "📹 Live Tracking",
-    "🎬 Debug Video",
-    "📄 Export Data",
+    "⚡ Kinematics",
+    "🔄 Compare",
+    "🎯 3D View",
+    "📹 Live",
+    "🎬 Video",
+    "📤 Export",
 ])
 
 
@@ -1081,9 +1263,10 @@ with tab_comparison:
         dtw_badge = ""
         if use_dtw and R["dtw_alignment"]:
             dtw_badge = (
-                '<span style="background:rgba(74,222,128,0.15);color:#4ade80;'
-                'border:1px solid rgba(74,222,128,0.3);border-radius:6px;'
-                'padding:2px 10px;font-size:0.78rem;font-weight:600;">DTW ALIGNED</span>'
+                '<span style="background:rgba(201,148,58,0.12);color:#e8c068;'
+                'border:1px solid rgba(201,148,58,0.28);border-radius:6px;'
+                'padding:2px 10px;font-size:0.72rem;font-weight:700;'
+                'font-family:\'Fira Code\',monospace;letter-spacing:0.06em;">DTW ALIGNED</span>'
             )
         st.markdown(
             f'{_section_title("🔄", "Phase-by-Phase Comparison")} {dtw_badge}',
@@ -1092,15 +1275,19 @@ with tab_comparison:
 
         if similarity_score is not None:
             score_color = (
-                "#4ade80" if similarity_score >= 70 else
-                "#facc15" if similarity_score >= 40 else "#f87171"
+                "#c9943a" if similarity_score >= 70 else
+                "#e8c068" if similarity_score >= 40 else "#f87171"
             )
+            grade = "A" if similarity_score >= 85 else "B" if similarity_score >= 70 else "C" if similarity_score >= 50 else "D"
             st.markdown(
-                f'<div style="text-align:center;margin-bottom:1rem;">'
-                f'  <span style="font-size:2rem;font-weight:700;color:{score_color}">'
+                f'<div style="text-align:center;margin:0.5rem 0 1.2rem;">'
+                f'  <span style="font-family:\'Playfair Display\',serif;font-size:3rem;font-weight:900;color:{score_color}">'
                 f'{similarity_score:.0f}%</span>'
-                f'  <span style="color:#64748b;font-size:0.9rem;margin-left:0.5rem">'
-                f'DTW swing similarity score</span>'
+                f'  <span style="background:rgba(201,148,58,0.12);border:1px solid rgba(201,148,58,0.25);'
+                f'border-radius:6px;padding:2px 10px;font-size:0.9rem;font-weight:700;color:#e8c068;'
+                f'margin-left:0.6rem;vertical-align:middle;">Grade {grade}</span>'
+                f'  <div style="color:#5e7259;font-size:0.82rem;margin-top:0.3rem;font-family:\'Fira Code\',monospace;">'
+                f'DTW swing similarity vs. pro</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
