@@ -396,14 +396,15 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
   drive(B('RightShoulder'), shoulderCtr, lm12);
   drive(B('RightArm'),      lm12,        lm14);
   drive(B('RightForeArm'),  lm14,        lm16);
-  // Left leg chain
-  drive(B('LeftUpLeg'), lm23, lm25);
-  drive(B('LeftLeg'),   lm25, lm27);
-  drive(B('LeftFoot'),  lm27, lm31);
-  // Right leg chain
-  drive(B('RightUpLeg'), lm24, lm26);
-  drive(B('RightLeg'),   lm26, lm28);
-  drive(B('RightFoot'),  lm28, lm32);
+  // Leg chains — after the 180° Y rotation the model's anatomical "Left" bone
+  // sits on the camera's LEFT = subject's RIGHT side, so drive it with the
+  // subject's RIGHT leg landmarks (lm24/26/28/32), and vice-versa.
+  drive(B('LeftUpLeg'), lm24, lm26);
+  drive(B('LeftLeg'),   lm26, lm28);
+  drive(B('LeftFoot'),  lm28, lm32);
+  drive(B('RightUpLeg'), lm23, lm25);
+  drive(B('RightLeg'),   lm25, lm27);
+  drive(B('RightFoot'),  lm27, lm31);
 
   // Club shaft + head + swing trail (unchanged from original)
   if (clubFrame && clubFrame.has_club && clubFrame.grip && clubFrame.shaft_end) {
