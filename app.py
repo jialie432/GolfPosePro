@@ -796,14 +796,20 @@ if analyze_btn:
     # ── Step 6b: 3D landmark extraction ─────────────────────────────────
     update_progress(75, "🎯 Extracting 3D landmarks — student…")
     frames_3d_s = extract_full_3d_landmarks(student_path)
-    club_data_s = estimate_club_positions(frames_3d_s, phase_ranges_s)
+    update_progress(76, "🏌️ Detecting golf club — student…")
+    club_data_s = estimate_club_positions(
+        frames_3d_s, phase_ranges_s, video_path=student_path,
+    )
 
     frames_3d_p = None
     club_data_p = None
     if has_pro:
         update_progress(76, "🎯 Extracting 3D landmarks — pro…")
         frames_3d_p = extract_full_3d_landmarks(pro_path)
-        club_data_p = estimate_club_positions(frames_3d_p, phase_ranges_p)
+        update_progress(77, "🏌️ Detecting golf club — pro…")
+        club_data_p = estimate_club_positions(
+            frames_3d_p, phase_ranges_p, video_path=pro_path,
+        )
 
     json_3d_bytes = export_3d_json(frames_3d_s, club_data_s, phase_ranges_s)
 

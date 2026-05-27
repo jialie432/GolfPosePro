@@ -11,3 +11,4 @@ yt-dlp
 Pillow
 dataclasses-json==0.6.7
 backoff==2.2.1
+ultralytics>=8.3.0

@@ -234,6 +234,19 @@ function setBoneWorldQ(bone, worldQ) {
   bone.quaternion.copy(parentWorldQ.clone().invert().multiply(worldQ));
 }
 
+// Move a bone's pivot so its world position lands exactly at worldTarget.
+// Bone rotations are unaffected — only the local offset from parent changes.
+// Used to compensate for Mixamo rest-pose limb lengths that don't match the
+// captured subject's proportions.
+function setBoneHeadWorld(bone, worldTarget) {
+  if (!bone || !bone.parent || !worldTarget) return;
+  bone.parent.updateMatrixWorld(true);
+  const localPos = bone.parent.worldToLocal(worldTarget.clone());
+  bone.position.copy(localPos);
+  bone.updateMatrix();
+  bone.updateMatrixWorld(true);
+}
+
 // Drive a bone so it points from fromDir toward toDir (targetDir = to - from)
 function driveBone(bones, boneName, targetDir) {
   const bone = bones[boneName];
@@ -388,14 +401,41 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
   // Head/neck
   drive(B('Neck'),   shoulderCtr, mouthCtr);
   drive(B('Head'),   mouthCtr,    lm0);
+
+  // ── Hand-on-club targets ──
+  // When a club is detected, both wrists are forced to converge on the grip
+  // and both hands rotate to point down the shaft. This visually locks both
+  // hands onto the club (the upper hand rests at the grip, the lower hand
+  // wraps just below it). When no club is present, fall back to driving each
+  // forearm to its own wrist landmark.
+  let gripVec = null;
+  let shaftEndVec = null;
+  if (clubFrame && clubFrame.has_club && clubFrame.grip && clubFrame.shaft_end) {
+    gripVec     = new THREE.Vector3(clubFrame.grip.x,      -clubFrame.grip.y,      -clubFrame.grip.z);
+    shaftEndVec = new THREE.Vector3(clubFrame.shaft_end.x, -clubFrame.shaft_end.y, -clubFrame.shaft_end.z);
+  }
+  const leftHandTarget  = gripVec || lm15;
+  const rightHandTarget = gripVec || lm16;
+
   // Left arm chain
   drive(B('LeftShoulder'),  shoulderCtr, lm11);
   drive(B('LeftArm'),       lm11,        lm13);
-  drive(B('LeftForeArm'),   lm13,        lm15);
+  drive(B('LeftForeArm'),   lm13,        leftHandTarget);
   // Right arm chain
   drive(B('RightShoulder'), shoulderCtr, lm12);
   drive(B('RightArm'),      lm12,        lm14);
-  drive(B('RightForeArm'),  lm14,        lm16);
+  drive(B('RightForeArm'),  lm14,        rightHandTarget);
+
+  // Hands wrap around the shaft (point from grip toward club head).
+  // Falls back to forearm direction when no club is detected.
+  if (gripVec && shaftEndVec) {
+    const shaftDir = shaftEndVec.clone().sub(gripVec);
+    drive(B('LeftHand'),  gripVec, gripVec.clone().add(shaftDir));
+    drive(B('RightHand'), gripVec, gripVec.clone().add(shaftDir));
+  } else {
+    if (lm13 && lm15) drive(B('LeftHand'),  lm13, lm15);
+    if (lm14 && lm16) drive(B('RightHand'), lm14, lm16);
+  }
   // Leg chains — after the 180° Y rotation the model's anatomical "Left" bone
   // sits on the camera's LEFT = subject's RIGHT side, so drive it with the
   // subject's RIGHT leg landmarks (lm24/26/28/32), and vice-versa.
@@ -405,6 +445,18 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
   drive(B('RightUpLeg'), lm23, lm25);
   drive(B('RightLeg'),   lm25, lm27);
   drive(B('RightFoot'),  lm27, lm31);
+
+  // ── Pin hand pivots to the club grip ──
+  // The arm/leg bone CHAINS are left rotation-only so the rig's proportions
+  // (clavicle, spine, hip) are preserved — overriding intermediate joint
+  // positions would stretch the torso mesh because the surrounding bones
+  // stay at rest length. We only override the leaf HAND bones so both wrists
+  // physically meet at the detected grip when a club is present. This visibly
+  // locks both hands onto the club while keeping the body mesh undistorted.
+  if (gripVec) {
+    setBoneHeadWorld(bones[B('LeftHand')],  gripVec);
+    setBoneHeadWorld(bones[B('RightHand')], gripVec);
+  }
 
   // Club shaft + head + swing trail (unchanged from original)
   if (clubFrame && clubFrame.has_club && clubFrame.grip && clubFrame.shaft_end) {
