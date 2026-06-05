@@ -33,7 +33,7 @@ from golf_pose_pro.comparison import compare_swing_phases
 from golf_pose_pro.dtw_utils import align_phase_frames, compute_similarity_score
 from golf_pose_pro.video_gen import generate_debug_video
 from golf_pose_pro.export_utils import export_to_csv, export_to_json, export_3d_json
-from golf_pose_pro.club_estimation import estimate_club_positions
+from golf_pose_pro.club_estimation import estimate_club_positions, calculate_club_head_speed
 from golf_pose_pro.threejs_component import build_3d_viewer_html, build_live_tracking_html
 from golf_pose_pro.kinematics import (
     compute_all_joint_angles,
@@ -591,6 +591,31 @@ with st.sidebar:
             oe_min_cutoff = 1.0
             oe_beta = 0.007
 
+        st.markdown("**Club Head Speed**")
+        capture_fps_input = st.number_input(
+            "Capture frame rate (fps)",
+            min_value=24.0, max_value=1000.0, value=30.0, step=60.0,
+            help="Actual recording fps. For 480 fps slow-motion played back at 30 fps, enter 480.",
+        )
+        _shaft_presets = {
+            "Driver (1.07 m)":  1.07,
+            "3-Wood (0.97 m)":  0.97,
+            "Iron (0.89 m)":    0.89,
+        }
+        shaft_preset = st.selectbox(
+            "Club type",
+            list(_shaft_presets.keys()) + ["Custom"],
+            index=0,
+            help="Sets the physical grip-to-head shaft length used for speed calibration.",
+        )
+        if shaft_preset == "Custom":
+            physical_shaft_m_input = st.number_input(
+                "Shaft length (m)", min_value=0.7, max_value=1.3,
+                value=1.07, step=0.01,
+            )
+        else:
+            physical_shaft_m_input = _shaft_presets[shaft_preset]
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Hero header
@@ -800,15 +825,26 @@ if analyze_btn:
     club_data_s = estimate_club_positions(
         frames_3d_s, phase_ranges_s, video_path=student_path,
     )
+    club_speed_s = calculate_club_head_speed(
+        club_data_s,
+        actual_fps=capture_fps_input,
+        physical_shaft_m=physical_shaft_m_input,
+    )
 
     frames_3d_p = None
     club_data_p = None
+    club_speed_p = None
     if has_pro:
         update_progress(76, "🎯 Extracting 3D landmarks — pro…")
         frames_3d_p = extract_full_3d_landmarks(pro_path)
         update_progress(77, "🏌️ Detecting golf club — pro…")
         club_data_p = estimate_club_positions(
             frames_3d_p, phase_ranges_p, video_path=pro_path,
+        )
+        club_speed_p = calculate_club_head_speed(
+            club_data_p,
+            actual_fps=capture_fps_input,
+            physical_shaft_m=physical_shaft_m_input,
         )
 
     json_3d_bytes = export_3d_json(frames_3d_s, club_data_s, phase_ranges_s)
@@ -916,8 +952,10 @@ if analyze_btn:
         # 3D data
         "frames_3d_s":   frames_3d_s,
         "club_data_s":   club_data_s,
+        "club_speed_s":  club_speed_s,
         "frames_3d_p":   frames_3d_p,
         "club_data_p":   club_data_p,
+        "club_speed_p":  club_speed_p,
         "json_3d_bytes": json_3d_bytes,
         # Settings echo
         "track_options":  track_options,
@@ -978,7 +1016,19 @@ num_phases      = len(phase_ranges_s)
 video_fps_r     = R.get("video_fps", 30.0) or 30.0
 swing_secs      = swing_duration / max(video_fps_r, 1)
 
-kpi_cols = st.columns(4)
+club_speed_s = R.get("club_speed_s") or {}
+club_speed_p = R.get("club_speed_p") or {}
+speed_mph    = club_speed_s.get("speed_mph")
+
+if speed_mph is not None:
+    speed_val = f"{speed_mph:.0f}"
+    pro_spd   = club_speed_p.get("speed_mph")
+    speed_sub = f"vs pro {pro_spd:.0f} mph" if pro_spd is not None else "grip-to-head at impact"
+else:
+    speed_val = "—"
+    speed_sub = "set capture fps in ⚙️"
+
+kpi_cols = st.columns(5)
 kpi_data = [
     (f"{num_phases}", "PHASES", "Address → Follow Through"),
     (f"{swing_secs:.2f}s", "SWING TIME", f"frames {swing_start_s}–{swing_end_s}"),
@@ -990,6 +1040,7 @@ kpi_data = [
     ) if similarity_score is not None else (
         "—", "MATCH SCORE", "no pro video",
     ),
+    (f"{speed_val} mph", "CLUB HEAD SPEED", speed_sub),
 ]
 for col, (val, label, sub) in zip(kpi_cols, kpi_data):
     col.markdown(_metric_card(val, label, sub), unsafe_allow_html=True)

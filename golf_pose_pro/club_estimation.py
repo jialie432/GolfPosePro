@@ -501,6 +501,303 @@ def _estimate_with_heuristic(frames_3d: list) -> list:
     return club_data
 
 
+def calculate_club_head_speed(
+    club_positions: list,
+    actual_fps: float = 480.0,
+    physical_shaft_m: float = None,
+) -> dict:
+    """
+    Calculate club head speed at impact in mph.
+
+    Algorithm: decomposes club head velocity into grip translation (from reliable
+    MediaPipe wrist positions) and shaft rotation (from smoothed shaft-direction
+    change scaled by the physical shaft length). This avoids inflated speeds caused
+    by YOLO back-projection over-estimating shaft length.
+
+    Args:
+        club_positions:   Output of estimate_club_positions().
+        actual_fps:       True capture frame rate. For 480 fps slow-motion played
+                          back at 30 fps, pass 480 (the default).
+        physical_shaft_m: Known grip-to-head length in metres. Provide this for
+                          accuracy — the YOLO back-projection tends to overestimate
+                          shaft length, inflating speeds. Typical values:
+                            Driver ~1.07 m (42 in)  · 3-wood ~0.97 m · Iron ~0.89 m
+                          Leave None to use the apparent median from the data (less
+                          accurate but works when the true length is unknown).
+
+    Returns:
+        {
+          "impact_frame":     int   | None,
+          "speed_mph":        float | None,
+          "speed_ms":         float | None,
+          "apparent_shaft_m": float,          # median detected shaft length
+          "frame_speeds_mph": list,
+        }
+    """
+    import math
+    dt   = 1.0 / actual_fps
+    _MPH = 2.23694  # m/s → mph
+
+    # ── Extract grip & head positions ─────────────────────────────────────────
+    grip_pos = []
+    head_pos = []
+    for cp in club_positions:
+        if (cp.get("has_club")
+                and cp.get("grip") is not None
+                and cp.get("shaft_end") is not None):
+            g = cp["grip"]
+            s = cp["shaft_end"]
+            grip_pos.append(np.array([g["x"], g["y"], g["z"]]))
+            head_pos.append(np.array([s["x"], s["y"], s["z"]]))
+        else:
+            grip_pos.append(None)
+            head_pos.append(None)
+
+    n = len(grip_pos)
+
+    # ── Apparent shaft length (median of detected L per frame) ────────────────
+    apparent_lengths = [
+        float(np.linalg.norm(head_pos[i] - grip_pos[i]))
+        for i in range(n)
+        if grip_pos[i] is not None and head_pos[i] is not None
+    ]
+    apparent_median = float(np.median(apparent_lengths)) if apparent_lengths else 1.0
+
+    shaft_len = physical_shaft_m if physical_shaft_m is not None else apparent_median
+
+    # ── Gaussian smoother (sigma=2.5, ±5 frames = 11-tap window) ─────────────
+    _SIG  = 4.0   # ~8 ms at 480 fps — wide enough to kill bbox jitter
+    _HWIN = 10
+    _w    = [math.exp(-0.5 * (k / _SIG) ** 2) for k in range(-_HWIN, _HWIN + 1)]
+
+    def _gauss_smooth(series):
+        out = [None] * n
+        for i in range(n):
+            accum, wtot = np.zeros(3), 0.0
+            for di, w in enumerate(_w):
+                j = i - _HWIN + di
+                if 0 <= j < n and series[j] is not None:
+                    accum += w * series[j]
+                    wtot  += w
+            if wtot > 0.1:
+                out[i] = accum / wtot
+        return out
+
+    smooth_grip = _gauss_smooth(grip_pos)
+
+    # Shaft unit-direction vectors; smooth them before scaling by physical length.
+    raw_dir = []
+    for i in range(n):
+        if grip_pos[i] is not None and head_pos[i] is not None:
+            d = head_pos[i] - grip_pos[i]
+            norm = float(np.linalg.norm(d))
+            raw_dir.append(d / norm if norm > 0.01 else None)
+        else:
+            raw_dir.append(None)
+
+    smooth_dir = _gauss_smooth(raw_dir)
+    # Re-normalise so the smoothed directions stay unit-length.
+    for i in range(n):
+        if smooth_dir[i] is not None:
+            m = float(np.linalg.norm(smooth_dir[i]))
+            smooth_dir[i] = smooth_dir[i] / m if m > 1e-6 else smooth_dir[i]
+
+    # Reconstruct smoothed shaft-end from smoothed grip + smoothed direction.
+    smooth_head = [
+        smooth_grip[i] + smooth_dir[i] * shaft_len
+        if smooth_grip[i] is not None and smooth_dir[i] is not None
+        else None
+        for i in range(n)
+    ]
+
+    # ── Central-difference velocity on smoothed shaft-end ────────────────────
+    speeds_ms = [None] * n
+    for i in range(n):
+        p = i > 0     and smooth_head[i - 1] is not None
+        nx = i < n-1  and smooth_head[i + 1] is not None
+        c  = smooth_head[i] is not None
+        if c and p and nx:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i+1] - smooth_head[i-1]) / (2*dt))
+        elif c and nx:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i+1] - smooth_head[i]) / dt)
+        elif c and p:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i] - smooth_head[i-1]) / dt)
+
+    speeds_mph = [round(s * _MPH, 1) if s is not None else None for s in speeds_ms]
+
+    valid = [(i, s) for i, s in enumerate(speeds_ms) if s is not None]
+    if not valid:
+        return {
+            "impact_frame":     None,
+            "speed_mph":        None,
+            "speed_ms":         None,
+            "apparent_shaft_m": round(apparent_median, 3),
+            "frame_speeds_mph": speeds_mph,
+        }
+
+    # Impact = frame of peak speed.
+    impact_frame, impact_speed_ms = max(valid, key=lambda x: x[1])
+    return {
+        "impact_frame":     impact_frame,
+        "speed_mph":        round(impact_speed_ms * _MPH, 1),
+        "speed_ms":         round(impact_speed_ms, 2),
+        "apparent_shaft_m": round(apparent_median, 3),
+        "frame_speeds_mph": speeds_mph,
+    }
+
+
+def calculate_attack_angle(
+    club_positions: list,
+    actual_fps: float = 480.0,
+    physical_shaft_m: float = None,
+) -> dict:
+    """
+    Calculate the attack angle at impact (Trackman definition).
+
+    Attack Angle is the vertical direction of the club head's movement at
+    maximum compression, measured relative to the horizon.
+    Negative = downward strike; positive = upward strike.
+
+    Typical PGA Tour values: driver −0.9°, 6-iron −3.7°.
+
+    Args:
+        club_positions:   Output of estimate_club_positions().
+        actual_fps:       True capture frame rate (e.g. 480 for 480 fps slow-mo
+                          played back at 30 fps).
+        physical_shaft_m: Known grip-to-head length in metres. Leave None to
+                          use the apparent median from detection.
+
+    Returns:
+        {
+          "attack_angle_deg":  float | None,        # negative=down, positive=up
+          "impact_frame":      int   | None,
+          "apparent_shaft_m":  float,               # median detected shaft length
+          "frame_angles_deg":  list[float | None],  # per-frame vertical angle
+        }
+    """
+    import math
+    dt = 1.0 / actual_fps
+
+    grip_pos = []
+    head_pos = []
+    for cp in club_positions:
+        if (cp.get("has_club")
+                and cp.get("grip") is not None
+                and cp.get("shaft_end") is not None):
+            g = cp["grip"]
+            s = cp["shaft_end"]
+            grip_pos.append(np.array([g["x"], g["y"], g["z"]]))
+            head_pos.append(np.array([s["x"], s["y"], s["z"]]))
+        else:
+            grip_pos.append(None)
+            head_pos.append(None)
+
+    n = len(grip_pos)
+
+    apparent_lengths = [
+        float(np.linalg.norm(head_pos[i] - grip_pos[i]))
+        for i in range(n)
+        if grip_pos[i] is not None and head_pos[i] is not None
+    ]
+    apparent_median = float(np.median(apparent_lengths)) if apparent_lengths else 1.0
+    shaft_len = physical_shaft_m if physical_shaft_m is not None else apparent_median
+
+    # Gaussian smoother (same parameters as calculate_club_head_speed)
+    _SIG  = 4.0
+    _HWIN = 10
+    _w    = [math.exp(-0.5 * (k / _SIG) ** 2) for k in range(-_HWIN, _HWIN + 1)]
+
+    def _gauss_smooth(series):
+        out = [None] * n
+        for i in range(n):
+            accum, wtot = np.zeros(3), 0.0
+            for di, w in enumerate(_w):
+                j = i - _HWIN + di
+                if 0 <= j < n and series[j] is not None:
+                    accum += w * series[j]
+                    wtot  += w
+            if wtot > 0.1:
+                out[i] = accum / wtot
+        return out
+
+    smooth_grip = _gauss_smooth(grip_pos)
+
+    raw_dir = []
+    for i in range(n):
+        if grip_pos[i] is not None and head_pos[i] is not None:
+            d = head_pos[i] - grip_pos[i]
+            norm = float(np.linalg.norm(d))
+            raw_dir.append(d / norm if norm > 0.01 else None)
+        else:
+            raw_dir.append(None)
+
+    smooth_dir = _gauss_smooth(raw_dir)
+    for i in range(n):
+        if smooth_dir[i] is not None:
+            m = float(np.linalg.norm(smooth_dir[i]))
+            smooth_dir[i] = smooth_dir[i] / m if m > 1e-6 else smooth_dir[i]
+
+    smooth_head = [
+        smooth_grip[i] + smooth_dir[i] * shaft_len
+        if smooth_grip[i] is not None and smooth_dir[i] is not None
+        else None
+        for i in range(n)
+    ]
+
+    # Per-frame speed (identifies impact = peak speed frame)
+    speeds_ms = [None] * n
+    for i in range(n):
+        p  = i > 0   and smooth_head[i - 1] is not None
+        nx = i < n-1 and smooth_head[i + 1] is not None
+        c  = smooth_head[i] is not None
+        if c and p and nx:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i+1] - smooth_head[i-1]) / (2*dt))
+        elif c and nx:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i+1] - smooth_head[i]) / dt)
+        elif c and p:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i] - smooth_head[i-1]) / dt)
+
+    # Per-frame vertical angle of club head velocity
+    frame_angles = [None] * n
+    for i in range(n):
+        p  = i > 0   and smooth_head[i - 1] is not None
+        nx = i < n-1 and smooth_head[i + 1] is not None
+        c  = smooth_head[i] is not None
+        if not c:
+            continue
+        if p and nx:
+            vel = (smooth_head[i + 1] - smooth_head[i - 1]) / (2 * dt)
+        elif nx:
+            vel = (smooth_head[i + 1] - smooth_head[i]) / dt
+        elif p:
+            vel = (smooth_head[i] - smooth_head[i - 1]) / dt
+        else:
+            continue
+        vx, vy, vz = vel
+        # MediaPipe world Y is positive downward. Down strike → positive vy →
+        # negative attack angle per Trackman convention.
+        horiz = math.sqrt(vx ** 2 + vz ** 2)
+        if horiz > 1e-6:
+            frame_angles[i] = round(math.degrees(math.atan2(-vy, horiz)), 2)
+
+    valid = [(i, s) for i, s in enumerate(speeds_ms) if s is not None]
+    if not valid:
+        return {
+            "attack_angle_deg": None,
+            "impact_frame":     None,
+            "apparent_shaft_m": round(apparent_median, 3),
+            "frame_angles_deg": frame_angles,
+        }
+
+    impact_frame = max(valid, key=lambda x: x[1])[0]
+    return {
+        "attack_angle_deg": frame_angles[impact_frame],
+        "impact_frame":     impact_frame,
+        "apparent_shaft_m": round(apparent_median, 3),
+        "frame_angles_deg": frame_angles,
+    }
+
+
 def _estimate_body_scale(frames_3d: list) -> float:
     """Body scale = shoulder-to-hip distance from the first valid frame."""
     for frame in frames_3d[:30]:
