@@ -33,7 +33,7 @@ from golf_pose_pro.comparison import compare_swing_phases
 from golf_pose_pro.dtw_utils import align_phase_frames, compute_similarity_score
 from golf_pose_pro.video_gen import generate_debug_video
 from golf_pose_pro.export_utils import export_to_csv, export_to_json, export_3d_json
-from golf_pose_pro.club_estimation import estimate_club_positions, calculate_club_head_speed
+from golf_pose_pro.club_estimation import estimate_club_positions, calculate_club_head_speed, calculate_attack_angle, calculate_club_path
 from golf_pose_pro.threejs_component import build_3d_viewer_html, build_live_tracking_html
 from golf_pose_pro.kinematics import (
     compute_all_joint_angles,
@@ -592,11 +592,33 @@ with st.sidebar:
             oe_beta = 0.007
 
         st.markdown("**Club Head Speed**")
-        capture_fps_input = st.number_input(
-            "Capture frame rate (fps)",
-            min_value=24.0, max_value=1000.0, value=30.0, step=60.0,
-            help="Actual recording fps. For 480 fps slow-motion played back at 30 fps, enter 480.",
+        _fps_presets = {
+            "480 fps slow-mo (16× — iPhone/Pro, GoPro)": 480.0,
+            "240 fps slow-mo (8× — iPhone, Galaxy)":     240.0,
+            "120 fps slow-mo (4× — iPhone, DSLR)":       120.0,
+            "960 fps slow-mo (32× — iPhone 13 Pro+)":    960.0,
+            "60 fps (regular)":                           60.0,
+            "30 fps (regular)":                           30.0,
+            "Custom":                                      None,
+        }
+        fps_preset = st.selectbox(
+            "Capture frame rate",
+            list(_fps_presets.keys()),
+            index=0,
+            help=(
+                "The actual recording fps of the camera, NOT the playback fps. "
+                "Slow-motion video is shot at a high fps and played back slowly — "
+                "choose the capture fps so club head speed is calculated correctly. "
+                "Tiger Woods driver footage at 480 fps → ~120–130 mph."
+            ),
         )
+        if fps_preset == "Custom":
+            capture_fps_input = st.number_input(
+                "Custom capture fps", min_value=24.0, max_value=10000.0,
+                value=480.0, step=60.0,
+            )
+        else:
+            capture_fps_input = _fps_presets[fps_preset]
         _shaft_presets = {
             "Driver (1.07 m)":  1.07,
             "3-Wood (0.97 m)":  0.97,
@@ -606,7 +628,7 @@ with st.sidebar:
             "Club type",
             list(_shaft_presets.keys()) + ["Custom"],
             index=0,
-            help="Sets the physical grip-to-head shaft length used for speed calibration.",
+            help="Sets the physical grip-to-head shaft length used for 3D position and speed calibration.",
         )
         if shaft_preset == "Custom":
             physical_shaft_m_input = st.number_input(
@@ -824,27 +846,53 @@ if analyze_btn:
     update_progress(76, "🏌️ Detecting golf club — student…")
     club_data_s = estimate_club_positions(
         frames_3d_s, phase_ranges_s, video_path=student_path,
+        physical_shaft_m=physical_shaft_m_input,
     )
     club_speed_s = calculate_club_head_speed(
         club_data_s,
         actual_fps=capture_fps_input,
         physical_shaft_m=physical_shaft_m_input,
     )
+    club_angle_s = calculate_attack_angle(
+        club_data_s,
+        actual_fps=capture_fps_input,
+        physical_shaft_m=physical_shaft_m_input,
+    )
+    club_path_s = calculate_club_path(
+        club_data_s,
+        actual_fps=capture_fps_input,
+        physical_shaft_m=physical_shaft_m_input,
+        frames_3d=frames_3d_s,
+    )
 
     frames_3d_p = None
     club_data_p = None
     club_speed_p = None
+    club_angle_p = None
+    club_path_p  = None
     if has_pro:
         update_progress(76, "🎯 Extracting 3D landmarks — pro…")
         frames_3d_p = extract_full_3d_landmarks(pro_path)
         update_progress(77, "🏌️ Detecting golf club — pro…")
         club_data_p = estimate_club_positions(
             frames_3d_p, phase_ranges_p, video_path=pro_path,
+            physical_shaft_m=physical_shaft_m_input,
         )
         club_speed_p = calculate_club_head_speed(
             club_data_p,
             actual_fps=capture_fps_input,
             physical_shaft_m=physical_shaft_m_input,
+        )
+        club_angle_p = calculate_attack_angle(
+            club_data_p,
+            actual_fps=capture_fps_input,
+            physical_shaft_m=physical_shaft_m_input,
+        )
+        club_path_p = calculate_club_path(
+            club_data_p,
+            actual_fps=capture_fps_input,
+            physical_shaft_m=physical_shaft_m_input,
+            frames_3d=frames_3d_p,
         )
 
     json_3d_bytes = export_3d_json(frames_3d_s, club_data_s, phase_ranges_s)
@@ -953,9 +1001,13 @@ if analyze_btn:
         "frames_3d_s":   frames_3d_s,
         "club_data_s":   club_data_s,
         "club_speed_s":  club_speed_s,
+        "club_angle_s":  club_angle_s,
+        "club_path_s":   club_path_s,
         "frames_3d_p":   frames_3d_p,
         "club_data_p":   club_data_p,
         "club_speed_p":  club_speed_p,
+        "club_angle_p":  club_angle_p,
+        "club_path_p":   club_path_p,
         "json_3d_bytes": json_3d_bytes,
         # Settings echo
         "track_options":  track_options,
@@ -1018,6 +1070,10 @@ swing_secs      = swing_duration / max(video_fps_r, 1)
 
 club_speed_s = R.get("club_speed_s") or {}
 club_speed_p = R.get("club_speed_p") or {}
+club_angle_s = R.get("club_angle_s") or {}
+club_angle_p = R.get("club_angle_p") or {}
+club_path_s  = R.get("club_path_s")  or {}
+club_path_p  = R.get("club_path_p")  or {}
 speed_mph    = club_speed_s.get("speed_mph")
 
 if speed_mph is not None:
@@ -1028,7 +1084,25 @@ else:
     speed_val = "—"
     speed_sub = "set capture fps in ⚙️"
 
-kpi_cols = st.columns(5)
+atk_deg = club_angle_s.get("attack_angle_deg")
+if atk_deg is not None:
+    atk_val = f"{atk_deg:+.1f}°"
+    pro_atk = club_angle_p.get("attack_angle_deg")
+    atk_sub = f"vs pro {pro_atk:+.1f}°" if pro_atk is not None else "neg=down · pos=up"
+else:
+    atk_val = "—"
+    atk_sub = "set capture fps in ⚙️"
+
+cp_deg = club_path_s.get("club_path_deg")
+if cp_deg is not None:
+    cp_val = f"{cp_deg:+.1f}°"
+    pro_cp = club_path_p.get("club_path_deg")
+    cp_sub = f"vs pro {pro_cp:+.1f}°" if pro_cp is not None else "pos=in-to-out · neg=out-to-in"
+else:
+    cp_val = "—"
+    cp_sub = "set capture fps in ⚙️"
+
+kpi_cols = st.columns(7)
 kpi_data = [
     (f"{num_phases}", "PHASES", "Address → Follow Through"),
     (f"{swing_secs:.2f}s", "SWING TIME", f"frames {swing_start_s}–{swing_end_s}"),
@@ -1041,6 +1115,8 @@ kpi_data = [
         "—", "MATCH SCORE", "no pro video",
     ),
     (f"{speed_val} mph", "CLUB HEAD SPEED", speed_sub),
+    (atk_val, "ATTACK ANGLE", atk_sub),
+    (cp_val, "CLUB PATH", cp_sub),
 ]
 for col, (val, label, sub) in zip(kpi_cols, kpi_data):
     col.markdown(_metric_card(val, label, sub), unsafe_allow_html=True)
