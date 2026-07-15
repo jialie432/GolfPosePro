@@ -33,7 +33,7 @@ from golf_pose_pro.comparison import compare_swing_phases
 from golf_pose_pro.dtw_utils import align_phase_frames, compute_similarity_score
 from golf_pose_pro.video_gen import generate_debug_video
 from golf_pose_pro.export_utils import export_to_csv, export_to_json, export_3d_json
-from golf_pose_pro.club_estimation import estimate_club_positions, calculate_club_head_speed, calculate_attack_angle, calculate_club_path
+from golf_pose_pro.club_estimation import estimate_club_positions, calculate_club_head_speed, calculate_attack_angle, calculate_club_path, calculate_swing_plane
 from golf_pose_pro.threejs_component import build_3d_viewer_html, build_live_tracking_html
 from golf_pose_pro.kinematics import (
     compute_all_joint_angles,
@@ -864,12 +864,18 @@ if analyze_btn:
         physical_shaft_m=physical_shaft_m_input,
         frames_3d=frames_3d_s,
     )
+    club_plane_s = calculate_swing_plane(
+        club_data_s,
+        actual_fps=capture_fps_input,
+        physical_shaft_m=physical_shaft_m_input,
+    )
 
     frames_3d_p = None
     club_data_p = None
     club_speed_p = None
     club_angle_p = None
     club_path_p  = None
+    club_plane_p = None
     if has_pro:
         update_progress(76, "🎯 Extracting 3D landmarks — pro…")
         frames_3d_p = extract_full_3d_landmarks(pro_path)
@@ -893,6 +899,11 @@ if analyze_btn:
             actual_fps=capture_fps_input,
             physical_shaft_m=physical_shaft_m_input,
             frames_3d=frames_3d_p,
+        )
+        club_plane_p = calculate_swing_plane(
+            club_data_p,
+            actual_fps=capture_fps_input,
+            physical_shaft_m=physical_shaft_m_input,
         )
 
     json_3d_bytes = export_3d_json(frames_3d_s, club_data_s, phase_ranges_s)
@@ -1003,11 +1014,13 @@ if analyze_btn:
         "club_speed_s":  club_speed_s,
         "club_angle_s":  club_angle_s,
         "club_path_s":   club_path_s,
+        "club_plane_s":  club_plane_s,
         "frames_3d_p":   frames_3d_p,
         "club_data_p":   club_data_p,
         "club_speed_p":  club_speed_p,
         "club_angle_p":  club_angle_p,
         "club_path_p":   club_path_p,
+        "club_plane_p":  club_plane_p,
         "json_3d_bytes": json_3d_bytes,
         # Settings echo
         "track_options":  track_options,
@@ -1074,6 +1087,8 @@ club_angle_s = R.get("club_angle_s") or {}
 club_angle_p = R.get("club_angle_p") or {}
 club_path_s  = R.get("club_path_s")  or {}
 club_path_p  = R.get("club_path_p")  or {}
+club_plane_s = R.get("club_plane_s") or {}
+club_plane_p = R.get("club_plane_p") or {}
 speed_mph    = club_speed_s.get("speed_mph")
 
 if speed_mph is not None:
@@ -1102,7 +1117,16 @@ else:
     cp_val = "—"
     cp_sub = "set capture fps in ⚙️"
 
-kpi_cols = st.columns(7)
+sp_deg = club_plane_s.get("swing_plane_deg")
+if sp_deg is not None:
+    sp_val = f"{sp_deg:.0f}°"
+    pro_sp = club_plane_p.get("swing_plane_deg")
+    sp_sub = f"vs pro {pro_sp:.0f}°" if pro_sp is not None else "tilt from horizon · driver ~48°"
+else:
+    sp_val = "—"
+    sp_sub = "set capture fps in ⚙️"
+
+kpi_cols = st.columns(8)
 kpi_data = [
     (f"{num_phases}", "PHASES", "Address → Follow Through"),
     (f"{swing_secs:.2f}s", "SWING TIME", f"frames {swing_start_s}–{swing_end_s}"),
@@ -1117,6 +1141,7 @@ kpi_data = [
     (f"{speed_val} mph", "CLUB HEAD SPEED", speed_sub),
     (atk_val, "ATTACK ANGLE", atk_sub),
     (cp_val, "CLUB PATH", cp_sub),
+    (sp_val, "SWING PLANE", sp_sub),
 ]
 for col, (val, label, sub) in zip(kpi_cols, kpi_data):
     col.markdown(_metric_card(val, label, sub), unsafe_allow_html=True)

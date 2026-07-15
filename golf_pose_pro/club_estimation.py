@@ -983,6 +983,197 @@ def calculate_club_path(
     }
 
 
+def calculate_swing_plane(
+    club_positions: list,
+    actual_fps: float = 480.0,
+    physical_shaft_m: float = None,
+) -> dict:
+    """
+    Swing Plane (TrackMan definition): the vertical angle, relative to the
+    horizon, of the plane in which the club head travels through the swing.
+
+      0°   = perfectly flat (horizontal) swing
+      90°  = perfectly upright (vertical) swing
+
+    TrackMan reference driver values: ~48° (male scratch) to ~49° (mid-handicap);
+    elite players ~45°–52°. Shorter, higher-lofted clubs sit closer to the body
+    and produce steeper (larger) angles.
+
+    Method (monocular, depth-robust)
+    --------------------------------
+    A radar like TrackMan fits a 3D plane to the club head's path; that needs
+    accurate depth. From a single face-on camera the depth (Z) axis is poorly
+    recovered, so a direct 3D plane fit collapses onto the image plane and is
+    meaningless. Instead we use the projection geometry of the swing:
+
+      The swing arc is (approximately) a circle of radius R lying in a plane
+      tilted by θ from the ground about the target line. A face-on camera
+      (target line ≈ horizontal in frame) projects that circle to an ELLIPSE
+      in the reliable image (X–Y) plane with semi-axes R (horizontal) and
+      R·sinθ (vertical). Hence
+
+          sinθ = (vertical extent) / (horizontal extent)
+               = σ_minor / σ_major
+
+      where σ_minor, σ_major are the principal-axis spreads (PCA singular
+      values) of the club head's X–Y positions. This recovers the plane tilt
+      using only the well-measured image-plane coordinates — no depth needed.
+
+    Steps:
+    1. Reconstruct smoothed club head positions (same grip-translation +
+       shaft-rotation model used by the speed / attack-angle calculators).
+    2. PCA on the X–Y (image-plane) club head positions over the whole swing.
+    3. swing_plane_deg = degrees(arcsin(σ_minor / σ_major)).
+
+    Assumes a roughly face-on camera with the target line near-horizontal in
+    frame (the same setup the club-path calculator assumes). Expect a few
+    degrees of error versus a radar reading.
+
+    Args:
+        club_positions:   Output of estimate_club_positions().
+        actual_fps:       True capture frame rate (e.g. 480 for 480 fps slow-mo
+                          played back at 30 fps). Used to locate impact.
+        physical_shaft_m: Known grip-to-head length in metres. Leave None to
+                          use the apparent median from detection.
+
+    Returns:
+        {
+          "swing_plane_deg":  float | None,   # tilt from horizon, 0–90
+          "impact_frame":     int   | None,
+          "n_points":         int,            # head points used in the fit
+          "apparent_shaft_m": float,
+        }
+    """
+    import math
+    dt = 1.0 / actual_fps
+
+    grip_pos = []
+    head_pos = []
+    for cp in club_positions:
+        if (cp.get("has_club")
+                and cp.get("grip") is not None
+                and cp.get("shaft_end") is not None):
+            g = cp["grip"]
+            s = cp["shaft_end"]
+            grip_pos.append(np.array([g["x"], g["y"], g["z"]]))
+            head_pos.append(np.array([s["x"], s["y"], s["z"]]))
+        else:
+            grip_pos.append(None)
+            head_pos.append(None)
+
+    n = len(grip_pos)
+
+    apparent_lengths = [
+        float(np.linalg.norm(head_pos[i] - grip_pos[i]))
+        for i in range(n)
+        if grip_pos[i] is not None and head_pos[i] is not None
+    ]
+    apparent_median = float(np.median(apparent_lengths)) if apparent_lengths else 1.0
+    shaft_len = physical_shaft_m if physical_shaft_m is not None else apparent_median
+
+    _SIG  = 4.0
+    _HWIN = 10
+    _w    = [math.exp(-0.5 * (k / _SIG) ** 2) for k in range(-_HWIN, _HWIN + 1)]
+
+    def _gauss_smooth(series):
+        out = [None] * n
+        for i in range(n):
+            accum, wtot = np.zeros(3), 0.0
+            for di, w in enumerate(_w):
+                j = i - _HWIN + di
+                if 0 <= j < n and series[j] is not None:
+                    accum += w * series[j]
+                    wtot  += w
+            if wtot > 0.1:
+                out[i] = accum / wtot
+        return out
+
+    smooth_grip = _gauss_smooth(grip_pos)
+
+    raw_dir = []
+    for i in range(n):
+        if grip_pos[i] is not None and head_pos[i] is not None:
+            d = head_pos[i] - grip_pos[i]
+            norm = float(np.linalg.norm(d))
+            raw_dir.append(d / norm if norm > 0.01 else None)
+        else:
+            raw_dir.append(None)
+
+    smooth_dir = _gauss_smooth(raw_dir)
+    for i in range(n):
+        if smooth_dir[i] is not None:
+            m = float(np.linalg.norm(smooth_dir[i]))
+            smooth_dir[i] = smooth_dir[i] / m if m > 1e-6 else smooth_dir[i]
+
+    smooth_head = [
+        smooth_grip[i] + smooth_dir[i] * shaft_len
+        if smooth_grip[i] is not None and smooth_dir[i] is not None
+        else None
+        for i in range(n)
+    ]
+
+    # Per-frame speed → locate impact (peak speed)
+    speeds_ms = [None] * n
+    for i in range(n):
+        p  = i > 0   and smooth_head[i - 1] is not None
+        nx = i < n-1 and smooth_head[i + 1] is not None
+        c  = smooth_head[i] is not None
+        if c and p and nx:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i+1] - smooth_head[i-1]) / (2*dt))
+        elif c and nx:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i+1] - smooth_head[i]) / dt)
+        elif c and p:
+            speeds_ms[i] = float(np.linalg.norm(smooth_head[i] - smooth_head[i-1]) / dt)
+
+    valid = [(i, s) for i, s in enumerate(speeds_ms) if s is not None]
+    if not valid:
+        return {
+            "swing_plane_deg":  None,
+            "impact_frame":     None,
+            "n_points":         0,
+            "apparent_shaft_m": round(apparent_median, 3),
+        }
+
+    impact_frame = max(valid, key=lambda x: x[1])[0]
+
+    # ── Ellipse-projection plane tilt ────────────────────────────────────────
+    # Gather the club head's image-plane (X, Y) positions over the whole swing.
+    # The face-on camera projects the tilted swing circle to an ellipse whose
+    # minor/major axis ratio equals sin(plane tilt).
+    pts_xy = np.array([smooth_head[i][:2]
+                       for i in range(n) if smooth_head[i] is not None])
+
+    if len(pts_xy) < 5:
+        return {
+            "swing_plane_deg":  None,
+            "impact_frame":     impact_frame,
+            "n_points":         int(len(pts_xy)),
+            "apparent_shaft_m": round(apparent_median, 3),
+        }
+
+    centroid = pts_xy.mean(axis=0)
+    sigma = np.linalg.svd(pts_xy - centroid, compute_uv=False)  # σ_major ≥ σ_minor
+    sigma_major, sigma_minor = float(sigma[0]), float(sigma[1])
+
+    if sigma_major < 1e-9:
+        return {
+            "swing_plane_deg":  None,
+            "impact_frame":     impact_frame,
+            "n_points":         int(len(pts_xy)),
+            "apparent_shaft_m": round(apparent_median, 3),
+        }
+
+    ratio = min(1.0, sigma_minor / sigma_major)
+    swing_plane_deg = round(math.degrees(math.asin(ratio)), 1)
+
+    return {
+        "swing_plane_deg":  swing_plane_deg,
+        "impact_frame":     impact_frame,
+        "n_points":         int(len(pts_xy)),
+        "apparent_shaft_m": round(apparent_median, 3),
+    }
+
+
 def _estimate_body_scale(frames_3d: list) -> float:
     """Body scale = shoulder-to-hip distance from the first valid frame."""
     for frame in frames_3d[:30]:
