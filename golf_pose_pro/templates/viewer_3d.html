@@ -194,6 +194,15 @@ if (isComparison) compScene = createSceneInfrastructure();
 // ── Bone retargeting data (populated once after GLB load) ──
 const restAxis = {};    // boneName → Vector3 (world rest direction bone→firstChild)
 const restWorldQ = {};  // boneName → Quaternion (bone world quaternion at rest)
+const restLocalQ = {};  // boneName → Quaternion (bone local rest quaternion, for finger curl)
+const tunnelOffset = {}; // handBoneName → Vector3 (local offset from wrist to the "grip tunnel"
+                          // formed once fingers curl — used so the shaft lines up with the
+                          // curled fist instead of the bare wrist pivot)
+const restForearmLenWorld = {}; // foreArmBoneName → number (elbow→wrist rest distance, WORLD
+                                 // units). bone.position.length() is in the bone's own raw local
+                                 // space, unscaled by the ~0.01 ancestor scale baked into this
+                                 // GLB — using it directly as a world length makes every stretch
+                                 // ratio ~100x too small. Cache the properly-scaled version once.
 
 // Auto-detected Mixamo bone prefix ('mixamorig:' or 'mixamorig' etc.)
 let MIXAMO_PREFIX = 'mixamorig:';
@@ -207,6 +216,7 @@ function cacheRestData(model) {
     const wq = new THREE.Quaternion();
     obj.getWorldQuaternion(wq);
     restWorldQ[obj.name] = wq.clone();
+    restLocalQ[obj.name] = obj.quaternion.clone();
 
     const boneKids = obj.children.filter(c => c.isBone);
     if (boneKids.length > 0) {
@@ -217,6 +227,37 @@ function cacheRestData(model) {
       restAxis[obj.name] = d.lengthSq() > 1e-10 ? d.normalize() : new THREE.Vector3(0, 1, 0);
     } else {
       restAxis[obj.name] = new THREE.Vector3(0, 1, 0);
+    }
+  });
+}
+
+// Cache each hand's wrist→"grip tunnel" offset (in the hand bone's own local
+// space, pre-scaled to world units) using the middle finger's knuckle as a
+// stand-in for where a curled fist actually closes around a shaft. Kept
+// deliberately small (well under the knuckle distance) — the forearm bone
+// has a fixed rest length, so shifting the wrist target too far from the
+// raw grip point pulls the hand away from where the (unstretchable) forearm
+// mesh actually ends, opening a visible gap at the wrist. Must run after
+// cacheRestData so MIXAMO_PREFIX and rest world transforms are resolved.
+const TUNNEL_OFFSET_FACTOR = 0.35;
+function cacheHandTunnelOffsets(model) {
+  const bones = buildBoneMap(model);
+  ['Left', 'Right'].forEach(side => {
+    const handBone = bones[B(side + 'Hand')];
+    const foreArmBone = bones[B(side + 'ForeArm')];
+    const midBone   = bones[B(side + 'HandMiddle1')];
+    if (!handBone || !midBone) return;
+    const worldPos = new THREE.Vector3();
+    midBone.getWorldPosition(worldPos);
+    const localOffset = handBone.worldToLocal(worldPos.clone());
+    const scale = handBone.getWorldScale(new THREE.Vector3()).x;
+    tunnelOffset[B(side + 'Hand')] = localOffset.multiplyScalar(scale * TUNNEL_OFFSET_FACTOR);
+
+    if (foreArmBone) {
+      const elbowWorld = new THREE.Vector3(), wristWorld = new THREE.Vector3();
+      foreArmBone.getWorldPosition(elbowWorld);
+      handBone.getWorldPosition(wristWorld);
+      restForearmLenWorld[B(side + 'ForeArm')] = elbowWorld.distanceTo(wristWorld);
     }
   });
 }
@@ -234,19 +275,6 @@ function setBoneWorldQ(bone, worldQ) {
   bone.quaternion.copy(parentWorldQ.clone().invert().multiply(worldQ));
 }
 
-// Move a bone's pivot so its world position lands exactly at worldTarget.
-// Bone rotations are unaffected — only the local offset from parent changes.
-// Used to compensate for Mixamo rest-pose limb lengths that don't match the
-// captured subject's proportions.
-function setBoneHeadWorld(bone, worldTarget) {
-  if (!bone || !bone.parent || !worldTarget) return;
-  bone.parent.updateMatrixWorld(true);
-  const localPos = bone.parent.worldToLocal(worldTarget.clone());
-  bone.position.copy(localPos);
-  bone.updateMatrix();
-  bone.updateMatrixWorld(true);
-}
-
 // Drive a bone so it points from fromDir toward toDir (targetDir = to - from)
 function driveBone(bones, boneName, targetDir) {
   const bone = bones[boneName];
@@ -261,6 +289,138 @@ function driveBone(bones, boneName, targetDir) {
   setBoneWorldQ(bone, desiredWorldQ);
   bone.updateMatrix(); // sync matrix from new quaternion (handles matrixAutoUpdate=false)
   bone.updateMatrixWorld(true);
+}
+
+// Curl a hand's fingers into a fist-like grip (or back to flat/open when
+// curlDeg is 0). Mixamo hand bones are rigged with the finger's own length
+// along local +X and the knuckle-to-knuckle row along local Z, so a rotation
+// about local Z sweeps the fingertip from "pointing out" (+X) toward the
+// palm — i.e. a natural curl. The right hand's finger-length axis points
+// along -X instead of +X (mirrored rig), so its curl sign is flipped to
+// close in the same physical direction as the left hand.
+const GRIP_FINGERS = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'];
+const GRIP_CURL_DEG = 65;
+function curlFingers(bones, side, curlDeg) {
+  const sign = side === 'Left' ? 1 : -1;
+  const qZ = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(sign * curlDeg));
+  GRIP_FINGERS.forEach(finger => {
+    for (let i = 1; i <= 3; i++) {
+      const name = B(side + 'Hand' + finger + i);
+      const bone = bones[name];
+      const rest = restLocalQ[name];
+      if (!bone || !rest) continue;
+      bone.quaternion.copy(rest.clone().multiply(qZ));
+      bone.updateMatrix();
+      bone.updateMatrixWorld(true);
+    }
+  });
+}
+
+// World-space quaternion the hand bone should have so its local Z axis (the
+// knuckle row — see curlFingers above) aligns with the shaft direction, so a
+// curled fist closes AROUND the shaft rather than punching along it. Pure
+// function of cached rest data — doesn't require the bone to be posed yet.
+function gripHandWorldQuat(side, shaftDir) {
+  const handName = B(side + 'Hand');
+  const rWorldQ = restWorldQ[handName];
+  if (!rWorldQ || shaftDir.lengthSq() < 1e-8) return null;
+  const td = shaftDir.clone().normalize();
+  const zAxisRest = new THREE.Vector3(0, 0, 1).applyQuaternion(rWorldQ);
+  const R = new THREE.Quaternion().setFromUnitVectors(zAxisRest, td);
+  return rWorldQ.clone().premultiply(R);
+}
+
+// Where the wrist pivot should sit so the curled-finger "tunnel" (cached in
+// tunnelOffset), not the bare wrist, lands on the grip point. Computed
+// up front (before the forearm chain is driven) so the forearm can aim at
+// this SAME point instead of the raw grip — otherwise the forearm's fixed
+// rest length reaches toward one point while the wrist gets pinned to a
+// different one, tearing the mesh apart at the wrist.
+function gripWristTarget(side, gripVec, shaftDir) {
+  const offset = tunnelOffset[B(side + 'Hand')];
+  const worldQ = gripHandWorldQuat(side, shaftDir);
+  if (!offset || !worldQ) return gripVec;
+  return gripVec.clone().sub(offset.clone().applyQuaternion(worldQ));
+}
+
+// Stretch the forearm along its local length axis (X — see the Hand child's
+// rest position, which sits almost entirely on X) so the hand bone's fixed
+// REST-POSE offset lands exactly on worldTarget once the forearm has been
+// rotated toward it. This replaces forcibly overriding the hand bone's own
+// local position: moving a leaf bone's position independently of its parent
+// chain's actual reach tears the skinned mesh at the wrist, because vertices
+// with weight split between the ForeArm and Hand bones get dragged apart by
+// two transforms that no longer agree on where the joint is. Scaling the
+// parent instead keeps every skin-weighted vertex smoothly consistent — the
+// same mechanism standard "stretchy bone" IK rigs use. The hand bone gets
+// the inverse scale so its own geometry (and the fingers hanging off it)
+// doesn't balloon or shrink along with the forearm.
+const FOREARM_STRETCH_LIMITS = [0.4, 2.0];
+function stretchForearmToTarget(bones, side, worldTarget) {
+  const foreArm = bones[B(side + 'ForeArm')];
+  const hand = bones[B(side + 'Hand')];
+  const restLen = restForearmLenWorld[B(side + 'ForeArm')];
+  if (!foreArm || !hand || !worldTarget || !restLen || restLen < 1e-6) return;
+
+  const elbowWorld = new THREE.Vector3();
+  foreArm.getWorldPosition(elbowWorld);
+  const k = THREE.MathUtils.clamp(
+    worldTarget.distanceTo(elbowWorld) / restLen,
+    FOREARM_STRETCH_LIMITS[0], FOREARM_STRETCH_LIMITS[1]);
+
+  foreArm.scale.set(k, 1, 1);
+  foreArm.updateMatrix();
+  foreArm.updateMatrixWorld(true);
+
+  hand.scale.set(1 / k, 1, 1);
+  hand.updateMatrix();
+  hand.updateMatrixWorld(true);
+}
+
+// Reset a forearm/hand pair back to unstretched (used whenever no club is
+// gripped this frame, so a stretch applied on a previous club-gripping
+// frame doesn't linger).
+function resetForearmStretch(bones, side) {
+  const foreArm = bones[B(side + 'ForeArm')];
+  const hand = bones[B(side + 'Hand')];
+  if (foreArm) { foreArm.scale.set(1, 1, 1); foreArm.updateMatrix(); foreArm.updateMatrixWorld(true); }
+  if (hand)    { hand.scale.set(1, 1, 1);    hand.updateMatrix();    hand.updateMatrixWorld(true); }
+}
+
+// Rotate the forearm toward worldTarget, measuring direction from the
+// forearm bone's own CURRENT world position rather than the upstream elbow
+// landmark. driveBone's other callers all use landmark-to-landmark
+// directions, which is fine for pure rotation — but stretchForearmToTarget
+// measures its distance from the bone's actual position, and a target close
+// to the arm's natural reach makes the rotation very sensitive to which
+// "from" point is used. Using the same reference point for both keeps them
+// in agreement so the stretched hand actually lands on worldTarget instead
+// of at an angle from it.
+function driveForeArmToGrip(bones, side, worldTarget) {
+  const foreArmName = B(side + 'ForeArm');
+  const foreArm = bones[foreArmName];
+  if (!foreArm || !worldTarget) return;
+  const elbowWorld = new THREE.Vector3();
+  foreArm.getWorldPosition(elbowWorld);
+  driveBone(bones, foreArmName, worldTarget.clone().sub(elbowWorld));
+}
+
+// Orient a hand so it wraps around the club shaft, then stretch the forearm
+// (not the hand's own position) so the wrist lands on the tunnel-adjusted
+// grip point. Must run after driveForeArmToGrip (see updateSkeleton), so the
+// forearm's local X already points the right way before we scale it.
+function orientHandOnGrip(bones, side, gripVec, shaftDir) {
+  const handName = B(side + 'Hand');
+  const bone = bones[handName];
+  const desiredWorldQ = gripHandWorldQuat(side, shaftDir);
+  if (!bone || !desiredWorldQ) return;
+
+  setBoneWorldQ(bone, desiredWorldQ);
+  bone.updateMatrix();
+  bone.updateMatrixWorld(true);
+
+  stretchForearmToTarget(bones, side, gripWristTarget(side, gripVec, shaftDir));
 }
 
 // ── Load Soldier.glb ──
@@ -291,6 +451,7 @@ loader.load(
 
     // Cache rest pose data after rotation so axes already match MediaPipe space.
     cacheRestData(originalScene);
+    cacheHandTunnelOffsets(originalScene);
 
     // Hip rest Y offset (world Y of Hips bone in rest pose)
     let hipRestY = 0;
@@ -404,37 +565,53 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
 
   // ── Hand-on-club targets ──
   // When a club is detected, both wrists are forced to converge on the grip
-  // and both hands rotate to point down the shaft. This visually locks both
-  // hands onto the club (the upper hand rests at the grip, the lower hand
-  // wraps just below it). When no club is present, fall back to driving each
-  // forearm to its own wrist landmark.
+  // (nudged slightly toward the curled-finger "tunnel", see gripWristTarget)
+  // and both hands rotate so their knuckle row wraps the shaft. This visually
+  // locks both hands onto the club. When no club is present, fall back to
+  // driving each forearm to its own wrist landmark.
   let gripVec = null;
   let shaftEndVec = null;
+  let shaftDir = null;
   if (clubFrame && clubFrame.has_club && clubFrame.grip && clubFrame.shaft_end) {
     gripVec     = new THREE.Vector3(clubFrame.grip.x,      -clubFrame.grip.y,      -clubFrame.grip.z);
     shaftEndVec = new THREE.Vector3(clubFrame.shaft_end.x, -clubFrame.shaft_end.y, -clubFrame.shaft_end.z);
+    shaftDir    = shaftEndVec.clone().sub(gripVec);
   }
-  const leftHandTarget  = gripVec || lm15;
-  const rightHandTarget = gripVec || lm16;
-
-  // Left arm chain
+  // Shoulder + upper-arm chain always follows the landmarks directly.
   drive(B('LeftShoulder'),  shoulderCtr, lm11);
   drive(B('LeftArm'),       lm11,        lm13);
-  drive(B('LeftForeArm'),   lm13,        leftHandTarget);
-  // Right arm chain
   drive(B('RightShoulder'), shoulderCtr, lm12);
   drive(B('RightArm'),      lm12,        lm14);
-  drive(B('RightForeArm'),  lm14,        rightHandTarget);
 
-  // Hands wrap around the shaft (point from grip toward club head).
-  // Falls back to forearm direction when no club is detected.
-  if (gripVec && shaftEndVec) {
-    const shaftDir = shaftEndVec.clone().sub(gripVec);
-    drive(B('LeftHand'),  gripVec, gripVec.clone().add(shaftDir));
-    drive(B('RightHand'), gripVec, gripVec.clone().add(shaftDir));
+  // Hands wrap around the shaft: the knuckle-row axis (not the fingers'
+  // pointing direction) is aligned with the shaft, and fingers curl into a
+  // fist around it — see orientHandOnGrip / curlFingers. Falls back to an
+  // open hand driven toward the forearm→wrist landmark when no club is
+  // detected.
+  if (gripVec && shaftDir) {
+    // The forearm's rotation must be aimed from its own CURRENT world
+    // position, not the (slightly different, due to fixed rest-length
+    // mismatch) upper-arm landmark — orientHandOnGrip's stretch step below
+    // measures distance from that same actual position, and if the
+    // rotation were aimed from a different point the two would disagree on
+    // which direction is "toward the target", sending the stretched hand
+    // off at an angle instead of onto the grip.
+    driveForeArmToGrip(bones, 'Left',  gripWristTarget('Left',  gripVec, shaftDir));
+    driveForeArmToGrip(bones, 'Right', gripWristTarget('Right', gripVec, shaftDir));
+    orientHandOnGrip(bones, 'Left',  gripVec, shaftDir);
+    orientHandOnGrip(bones, 'Right', gripVec, shaftDir);
+    curlFingers(bones, 'Left',  GRIP_CURL_DEG);
+    curlFingers(bones, 'Right', GRIP_CURL_DEG);
   } else {
+    drive(B('LeftForeArm'),  lm13, lm15);
+    drive(B('RightForeArm'), lm14, lm16);
     if (lm13 && lm15) drive(B('LeftHand'),  lm13, lm15);
     if (lm14 && lm16) drive(B('RightHand'), lm14, lm16);
+    curlFingers(bones, 'Left',  0);
+    curlFingers(bones, 'Right', 0);
+    // Undo any forearm/hand stretch left over from a club-gripping frame.
+    resetForearmStretch(bones, 'Left');
+    resetForearmStretch(bones, 'Right');
   }
   // Leg chains — after the 180° Y rotation the model's anatomical "Left" bone
   // sits on the camera's LEFT = subject's RIGHT side, so drive it with the
@@ -446,17 +623,10 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
   drive(B('RightLeg'),   lm25, lm27);
   drive(B('RightFoot'),  lm27, lm31);
 
-  // ── Pin hand pivots to the club grip ──
-  // The arm/leg bone CHAINS are left rotation-only so the rig's proportions
-  // (clavicle, spine, hip) are preserved — overriding intermediate joint
-  // positions would stretch the torso mesh because the surrounding bones
-  // stay at rest length. We only override the leaf HAND bones so both wrists
-  // physically meet at the detected grip when a club is present. This visibly
-  // locks both hands onto the club while keeping the body mesh undistorted.
-  if (gripVec) {
-    setBoneHeadWorld(bones[B('LeftHand')],  gripVec);
-    setBoneHeadWorld(bones[B('RightHand')], gripVec);
-  }
+  // Note: hand pivots are already pinned to the grip (tunnel-offset-adjusted)
+  // inside orientHandOnGrip above — the arm/leg bone CHAINS above stay
+  // rotation-only so the rig's proportions (clavicle, spine, hip) are
+  // preserved; only the leaf HAND bones get their position overridden.
 
   // Club shaft + head + swing trail (unchanged from original)
   if (clubFrame && clubFrame.has_club && clubFrame.grip && clubFrame.shaft_end) {
