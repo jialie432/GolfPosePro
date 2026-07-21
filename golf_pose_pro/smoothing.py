@@ -245,6 +245,66 @@ def smooth_landmarks(
     return result
 
 
+def smooth_landmarks_3d(
+    frames_3d: list,
+    fps: float = 30.0,
+    min_cutoff: float = 1.0,
+    beta: float = 0.007,
+    d_cutoff: float = 1.0,
+) -> list:
+    """
+    Apply the One-Euro Filter to full-body 3D world landmarks in place.
+
+    frames_3d is the output of extract_full_3d_landmarks(): a list of
+    {frame_idx, timestamp_ms, landmarks: [{idx, x, y, z, visibility}, ...]}.
+    MediaPipe's per-frame 3D depth/position estimates carry enough noise that
+    a joint can visibly drift several centimeters frame-to-frame even when
+    the subject barely moves (e.g. legs appearing to converge during a
+    planted-foot impact position) — smoothing each landmark's x/y/z series
+    independently removes that jitter while preserving fast real motion.
+    Landmarks marked not-visible (x is None) are left untouched.
+
+    Returns frames_3d (mutated in place).
+    """
+    if not frames_3d:
+        return frames_3d
+
+    n = len(frames_3d)
+    by_idx = {}  # landmark idx -> list of landmark dict-or-None, aligned to frames_3d order
+    for frame in frames_3d:
+        for l in frame["landmarks"]:
+            by_idx.setdefault(l["idx"], [None] * n)
+
+    for fi, frame in enumerate(frames_3d):
+        lm_by_idx = {l["idx"]: l for l in frame["landmarks"]}
+        for idx, entries in by_idx.items():
+            entries[fi] = lm_by_idx.get(idx)
+
+    for entries in by_idx.values():
+        mask = [e is not None and e["x"] is not None for e in entries]
+        if not any(mask):
+            continue
+        for axis in ("x", "y", "z"):
+            raw = np.array(
+                [e[axis] if m else np.nan for e, m in zip(entries, mask)], dtype=float
+            )
+            nans = np.isnan(raw)
+            if nans.all():
+                continue
+            if nans.any():
+                filled_idx = np.where(~nans, np.arange(n), 0)
+                np.maximum.accumulate(filled_idx, out=filled_idx)
+                raw = raw[filled_idx]
+            smoothed = smooth_series(
+                raw, fps=fps, min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff
+            )
+            for fi in range(n):
+                if mask[fi]:
+                    entries[fi][axis] = round(float(smoothed[fi]), 5)
+
+    return frames_3d
+
+
 def smooth_series_uniform(
     data: np.ndarray,
     window: int = 5,
