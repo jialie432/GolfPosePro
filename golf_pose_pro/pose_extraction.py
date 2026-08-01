@@ -210,9 +210,11 @@ def extract_full_3d_landmarks(
 
     A brief transient left/right identity swap (BlazePose occasionally
     mislabels a whole side for a few frames during fast rotation, e.g. a golf
-    follow-through) is auto-corrected, then a One-Euro filter smooths each
-    landmark's position over time to remove per-frame depth-estimation
-    jitter.
+    follow-through) is auto-corrected, an arm that the camera can't see
+    (hidden behind the other arm at the top of the backswing / behind the
+    body through the finish) is rebuilt from the visible arm, then a One-Euro
+    filter smooths each landmark's position over time to remove per-frame
+    depth-estimation jitter.
 
     Returns:
         List of dicts: [{frame_idx, timestamp_ms, landmarks: [{idx, x, y, z, visibility}, ...]}, ...]
@@ -289,6 +291,7 @@ def extract_full_3d_landmarks(
 
     cap.release()
     _fix_left_right_swaps(frames_3d)
+    _fix_occluded_arms(frames_3d)
     if apply_smoothing:
         from .smoothing import smooth_landmarks_3d
         smooth_landmarks_3d(
@@ -361,6 +364,329 @@ def _fix_left_right_swaps(
                 ref_alpha * p[1] + (1 - ref_alpha) * prev[1],
                 ref_alpha * p[2] + (1 - ref_alpha) * prev[2],
             )
+
+    return frames_3d
+
+
+# ─── Occluded-arm reconstruction ─────────────────────────────────────────────
+
+# (shoulder, elbow, wrist) landmark indices, per arm
+_ARM_CHAINS = {"left": (11, 13, 15), "right": (12, 14, 16)}
+
+# (pinky, index, thumb) landmark indices, per hand. These ride along with the
+# wrist when an arm is rebuilt: the 3D viewer reads them to work out how the
+# hand is rolled around the club shaft, so leaving the originals behind at the
+# hallucinated wrist would hand it a grip orientation from thin air.
+_HAND_TIPS = {"left": (17, 19, 21), "right": (18, 20, 22)}
+
+
+def _unit(v):
+    """Normalize a vector, or None if it's too short to have a direction."""
+    n = float(np.linalg.norm(v))
+    return v / n if n > 1e-8 else None
+
+
+def _torso_basis(pts: dict):
+    """
+    Orthonormal (right, up, fwd) basis rigidly attached to the torso, built
+    from the shoulder and hip landmarks. None if any of them is missing.
+
+    Occluded-arm geometry is carried across a gap in THIS frame rather than in
+    world space: the golfer's torso turns through ~180° between the top of the
+    backswing and the finish, so a relationship that is near-constant in torso
+    coordinates ("the trail elbow points down and behind the chest") sweeps
+    through an enormous arc in world coordinates.
+    """
+    ls, rs, lh, rh = pts.get(11), pts.get(12), pts.get(23), pts.get(24)
+    if ls is None or rs is None or lh is None or rh is None:
+        return None
+    # MediaPipe world Y grows downward, so shoulders − hips points anatomically up.
+    up = _unit((ls + rs) / 2.0 - (lh + rh) / 2.0)
+    if up is None:
+        return None
+    right = rs - ls
+    right = _unit(right - float(np.dot(right, up)) * up)
+    if right is None:
+        return None
+    return right, up, np.cross(up, right)
+
+
+def _to_local(v, basis):
+    right, up, fwd = basis
+    return np.array([float(np.dot(v, right)), float(np.dot(v, up)), float(np.dot(v, fwd))])
+
+
+def _to_world(v, basis):
+    right, up, fwd = basis
+    return right * v[0] + up * v[1] + fwd * v[2]
+
+
+def _elbow_pole(shoulder, elbow, wrist):
+    """
+    The direction the elbow juts out from the shoulder→wrist axis — the one
+    degree of freedom a two-bone arm has left once both endpoints are fixed.
+    """
+    axis = _unit(wrist - shoulder)
+    if axis is None:
+        return None
+    d = elbow - shoulder
+    return _unit(d - float(np.dot(d, axis)) * axis)
+
+
+def _solve_elbow(shoulder, wrist, upper_len, fore_len, pole):
+    """
+    Two-bone IK: place the elbow so the upper arm and forearm keep their
+    measured lengths while spanning shoulder→wrist, with `pole` (a world-space
+    direction) choosing which point on the resulting circle of solutions to
+    use. Falls back to a straight arm when no pole direction is available.
+    """
+    reach = wrist - shoulder
+    d = float(np.linalg.norm(reach))
+    if d < 1e-6 or upper_len <= 0 or fore_len <= 0:
+        return None
+    axis = reach / d
+    if d >= upper_len + fore_len:
+        # Target sits past a straight arm. Straighten it and let both bones
+        # share the overreach in proportion, rather than pinning the elbow at
+        # the triangle's limit and leaving the entire stretch on the forearm.
+        return shoulder + axis * d * (upper_len / (upper_len + fore_len))
+    # Keep the triangle solvable when the wrist folds in close to the shoulder,
+    # nearer than the two bones can ever bring it.
+    d = max(d, abs(upper_len - fore_len) + 1e-4)
+    along = (d * d + upper_len ** 2 - fore_len ** 2) / (2.0 * d)
+    out = float(np.sqrt(max(upper_len ** 2 - along ** 2, 0.0)))
+
+    base = shoulder + axis * along
+    if pole is None:
+        return base
+    p = _unit(pole - float(np.dot(pole, axis)) * axis)
+    return base if p is None else base + p * out
+
+
+def _interp_vectors(series: list) -> list:
+    """
+    Fill None gaps in a list of vectors by linear interpolation, padding the
+    ends with the nearest known value. Used to carry the arm's shape across an
+    occluded stretch from the confident frames on either side of it.
+    """
+    known = [i for i, v in enumerate(series) if v is not None]
+    if not known:
+        return list(series)
+
+    out = list(series)
+    for i in range(known[0]):
+        out[i] = series[known[0]].copy()
+    for i in range(known[-1] + 1, len(series)):
+        out[i] = series[known[-1]].copy()
+    for a, b in zip(known, known[1:]):
+        for i in range(a + 1, b):
+            t = (i - a) / (b - a)
+            out[i] = (1.0 - t) * series[a] + t * series[b]
+    return out
+
+
+def _set_landmark(frame: dict, idx: int, p) -> None:
+    for l in frame["landmarks"]:
+        if l["idx"] == idx:
+            l["x"], l["y"], l["z"] = (round(float(p[0]), 5),
+                                      round(float(p[1]), 5),
+                                      round(float(p[2]), 5))
+            return
+
+
+def _fix_occluded_arms(
+    frames_3d: list,
+    vis_margin: float = 0.05,
+    vis_reliable: float = 0.85,
+    span_factor: float = 1.6,
+    bone_tol: tuple = (0.7, 1.4),
+    min_calibration_frac: float = 0.1,
+    reach_tol: float = 1.25,
+) -> list:
+    """
+    Rebuild an arm the camera cannot see from the arm it can.
+
+    Twice per swing an arm disappears from view: at the top of the backswing
+    the trail arm hides behind the lead arm and the chest, and through the
+    finish the lead arm hides behind the body. BlazePose does not report those
+    joints as missing — it invents them, and the invented arm drifts away from
+    the club (on TigerWoodsDriver.mov the right wrist wanders ~0.5 m from the
+    left from frame ~262 on, while both hands are in fact together on the
+    grip). Downstream that shows up as a broken-looking right arm in the 3D
+    viewer AND as a displaced club, since the grip point is the wrist midpoint.
+
+    Detection leans on what is physically impossible rather than on the
+    visibility score alone (which sags well before the pose actually breaks).
+    An arm is treated as invented when it does something a real arm cannot —
+      * both hands share a grip through a golf swing, so wrists further apart
+        than a couple of hand widths cannot both be right;
+      * bones do not change length, so an upper arm or forearm outside
+        `bone_tol` × its own measured length is fabricated;
+      * a joint MediaPipe dropped outright is missing —
+    AND this arm is the less confidently tracked of the two, by at least
+    `vis_margin`. That second half is what identifies WHICH of the two arms is
+    the broken one; when both sides are equally confident there is no evidence
+    for blaming either, so the frame is left alone.
+
+    Such an arm is replaced rather than trusted:
+      * the wrist is placed relative to the visible wrist using the
+        hand-to-hand offset measured on the confident frames bracketing the
+        occlusion, expressed in torso coordinates (see `_torso_basis`) so it
+        rotates with the body;
+      * the elbow is re-solved by two-bone IK at the arm's measured bone
+        lengths, using an elbow-out direction interpolated the same way.
+
+    Both the offset and the bone lengths are measured from this video's own
+    confident frames, so no assumption about body size is baked in. That also
+    means the whole pass needs a decent supply of them: on footage MediaPipe
+    barely tracks at all (subject too small or too dark — no arm clearly seen
+    for `min_calibration_frac` of the video) the proportions being
+    reconstructed from would themselves be guesses, so the landmarks are left
+    exactly as they are. Individual frames are likewise skipped when the
+    rebuilt wrist lands beyond the arm's reach, which means the visible arm
+    and the shoulders disagree and there is nothing solid to build on.
+
+    Frames where the arm is genuinely visible are left completely untouched.
+
+    Modifies frames_3d in place (also returned). Runs before smoothing so the
+    One-Euro filter blends the seams at the ends of each reconstructed run.
+    """
+    n = len(frames_3d)
+    if n == 0:
+        return frames_3d
+
+    # ── Per-frame geometry ──────────────────────────────────────────────────
+    pts_per_frame, vis_per_frame, basis_per_frame = [], [], []
+    for frame in frames_3d:
+        pts, vis = {}, {}
+        for l in frame["landmarks"]:
+            vis[l["idx"]] = l.get("visibility") or 0.0
+            if l["x"] is not None:
+                pts[l["idx"]] = np.array([l["x"], l["y"], l["z"]], dtype=float)
+        pts_per_frame.append(pts)
+        vis_per_frame.append(vis)
+        basis_per_frame.append(_torso_basis(pts))
+
+    def side_vis(fi, side):
+        _, e, w = _ARM_CHAINS[side]
+        return min(vis_per_frame[fi].get(e, 0.0), vis_per_frame[fi].get(w, 0.0))
+
+    def has_chain(fi, side):
+        return all(i in pts_per_frame[fi] for i in _ARM_CHAINS[side])
+
+    # ── Calibrate on frames where BOTH arms are clearly visible, so the
+    #    hallucinated poses can't skew the proportions we reconstruct from ──
+    spans, shoulder_widths = [], []
+    bones = {side: {"upper": [], "fore": []} for side in _ARM_CHAINS}
+    for fi in range(n):
+        pts = pts_per_frame[fi]
+        if 11 in pts and 12 in pts:
+            shoulder_widths.append(float(np.linalg.norm(pts[11] - pts[12])))
+        if not all(has_chain(fi, s) and side_vis(fi, s) >= vis_reliable
+                   for s in _ARM_CHAINS):
+            continue
+        spans.append(float(np.linalg.norm(pts[15] - pts[16])))
+        for side, (s, e, w) in _ARM_CHAINS.items():
+            bones[side]["upper"].append(float(np.linalg.norm(pts[s] - pts[e])))
+            bones[side]["fore"].append(float(np.linalg.norm(pts[e] - pts[w])))
+
+    if len(spans) < max(15, min_calibration_frac * n):
+        return frames_3d  # too little clean tracking to calibrate against
+
+    shoulder_w = float(np.median(shoulder_widths)) if shoulder_widths else 0.0
+    max_span = max(span_factor * float(np.median(spans)), 0.5 * shoulder_w)
+    lengths = {side: (float(np.median(bones[side]["upper"])),
+                      float(np.median(bones[side]["fore"])))
+               for side in _ARM_CHAINS}
+
+    # ── Reconstruct, one side at a time ─────────────────────────────────────
+    for side, other in (("left", "right"), ("right", "left")):
+        s_i, e_i, w_i = _ARM_CHAINS[side]
+        o_w = _ARM_CHAINS[other][2]
+        upper_len, fore_len = lengths[side]
+
+        def impossible(fi):
+            pts = pts_per_frame[fi]
+            if w_i not in pts or e_i not in pts:
+                return True   # MediaPipe gave up on the joint entirely
+            if np.linalg.norm(pts[w_i] - pts[o_w]) > max_span:
+                return True   # hands too far apart to be sharing one grip
+            for a, b, ref in ((s_i, e_i, upper_len), (e_i, w_i, fore_len)):
+                if a not in pts:
+                    continue
+                d = float(np.linalg.norm(pts[a] - pts[b]))
+                if not (bone_tol[0] * ref <= d <= bone_tol[1] * ref):
+                    return True   # bone squashed or stretched out of existence
+            return False
+
+        bad = [False] * n
+        for fi in range(n):
+            if (basis_per_frame[fi] is None or not has_chain(fi, other)
+                    or side_vis(fi, side) > side_vis(fi, other) - vis_margin):
+                continue
+            bad[fi] = impossible(fi)
+
+        if not any(bad):
+            continue
+
+        # Anchors: what this arm looks like on the frames we DO trust. A frame
+        # that fails the physical checks is excluded even when its visibility
+        # looks fine, so a half-corrupted frame at the edge of an occlusion
+        # can't seed the reconstruction with its own error.
+        offset_local = [None] * n   # this wrist relative to the other, torso coords
+        pole_local   = [None] * n   # elbow-out direction, torso coords
+        tips_local   = {t: [None] * n for t in _HAND_TIPS[side]}  # hand shape, torso coords
+        for fi in range(n):
+            pts, basis = pts_per_frame[fi], basis_per_frame[fi]
+            if (basis is None or not has_chain(fi, side)
+                    or side_vis(fi, side) < vis_reliable
+                    or o_w not in pts or impossible(fi)):
+                continue
+            offset_local[fi] = _to_local(pts[w_i] - pts[o_w], basis)
+            pole = _elbow_pole(pts[s_i], pts[e_i], pts[w_i])
+            if pole is not None:
+                pole_local[fi] = _to_local(pole, basis)
+            for t in _HAND_TIPS[side]:
+                if t in pts:
+                    tips_local[t][fi] = _to_local(pts[t] - pts[w_i], basis)
+
+        offsets = _interp_vectors(offset_local)
+        poles   = _interp_vectors(pole_local)
+        tips    = {t: _interp_vectors(v) for t, v in tips_local.items()}
+
+        for fi in range(n):
+            if not bad[fi]:
+                continue
+            pts, basis = pts_per_frame[fi], basis_per_frame[fi]
+            if s_i not in pts or o_w not in pts:
+                continue
+
+            off = offsets[fi]
+            wrist = pts[o_w] + (_to_world(off, basis) if off is not None
+                                else np.zeros(3))
+            # Out of reach means the visible wrist and this shoulder disagree;
+            # forcing it would just trade a broken arm for a stretched one.
+            # `reach_tol` sits well clear of a straight arm — MediaPipe's world
+            # landmarks put a fully extended arm at up to ~1.18× the summed
+            # median bone lengths, so a tighter bound would reject real poses.
+            if np.linalg.norm(wrist - pts[s_i]) > (upper_len + fore_len) * reach_tol:
+                continue
+            pole = _to_world(poles[fi], basis) if poles[fi] is not None else None
+            elbow = _solve_elbow(pts[s_i], wrist, upper_len, fore_len, pole)
+
+            _set_landmark(frames_3d[fi], w_i, wrist)
+            pts[w_i] = wrist
+            if elbow is not None:
+                _set_landmark(frames_3d[fi], e_i, elbow)
+                pts[e_i] = elbow
+            # Carry the hand's own shape (pinky/index/thumb) to the new wrist,
+            # so the viewer can still read which way the hand is rolled.
+            for t in _HAND_TIPS[side]:
+                if tips[t][fi] is None:
+                    continue
+                tip = wrist + _to_world(tips[t][fi], basis)
+                _set_landmark(frames_3d[fi], t, tip)
+                pts[t] = tip
 
     return frames_3d
 

@@ -97,6 +97,11 @@ const dtwAlignment = __DTW_ALIGNMENT__;
 const TOTAL = poseData.length;
 const MODEL_URL = "__MODEL_URL__";
 
+// How far the butt of the club sticks out past the topmost hand, in metres.
+// The club estimator reports "grip" as the wrist midpoint, which is a couple
+// of centimetres down from where a real club actually ends.
+const BUTT_CAP_M = 0.04;
+
 // ── Scene setup ──
 const canvas = document.getElementById('viewer');
 const container = document.getElementById('container');
@@ -198,6 +203,12 @@ const restLocalQ = {};  // boneName → Quaternion (bone local rest quaternion, 
 const tunnelOffset = {}; // handBoneName → Vector3 (local offset from wrist to the "grip tunnel"
                           // formed once fingers curl — used so the shaft lines up with the
                           // curled fist instead of the bare wrist pivot)
+const restHandFrame = {}; // handBoneName → { shaft, knuckle } — the hand's own anatomy, in
+                          // WORLD directions at rest. `shaft` runs pinky-knuckle → index-knuckle
+                          // (the line a club actually lies along where it crosses the palm) and
+                          // `knuckle` runs wrist → knuckles. Both are MEASURED off the rig rather
+                          // than assumed from Mixamo's axis conventions, so the grip can be posed
+                          // by naming anatomy instead of guessing which local axis is which.
 const restForearmLenWorld = {}; // foreArmBoneName → number (elbow→wrist rest distance, WORLD
                                  // units). bone.position.length() is in the bone's own raw local
                                  // space, unscaled by the ~0.01 ancestor scale baked into this
@@ -233,31 +244,44 @@ function cacheRestData(model) {
 
 // Cache each hand's wrist→"grip tunnel" offset (in the hand bone's own local
 // space, pre-scaled to world units) using the middle finger's knuckle as a
-// stand-in for where a curled fist actually closes around a shaft. Kept
-// deliberately small (well under the knuckle distance) — the forearm bone
-// has a fixed rest length, so shifting the wrist target too far from the
-// raw grip point pulls the hand away from where the (unstretchable) forearm
-// mesh actually ends, opening a visible gap at the wrist. Must run after
+// stand-in for where a curled hand actually closes around a shaft. A club is
+// held across the PALM, near the knuckles — not at the wrist pivot — so this
+// offset is most of the way out to the knuckle. It used to be kept down at
+// 0.35 because the forearm had a fixed rest length and moving the wrist that
+// far opened a gap at the joint; stretchForearmToTarget now takes up the
+// slack, so the hand can sit where it really would and the fingers curl
+// around the shaft instead of around empty air next to it. Must run after
 // cacheRestData so MIXAMO_PREFIX and rest world transforms are resolved.
-const TUNNEL_OFFSET_FACTOR = 0.35;
+const TUNNEL_OFFSET_FACTOR = 0.85;
 function cacheHandTunnelOffsets(model) {
   const bones = buildBoneMap(model);
+  const wp = b => b.getWorldPosition(new THREE.Vector3());
   ['Left', 'Right'].forEach(side => {
     const handBone = bones[B(side + 'Hand')];
     const foreArmBone = bones[B(side + 'ForeArm')];
     const midBone   = bones[B(side + 'HandMiddle1')];
+    const idxBone   = bones[B(side + 'HandIndex1')];
+    const pinkyBone = bones[B(side + 'HandPinky1')];
     if (!handBone || !midBone) return;
-    const worldPos = new THREE.Vector3();
-    midBone.getWorldPosition(worldPos);
+    const worldPos = wp(midBone);
     const localOffset = handBone.worldToLocal(worldPos.clone());
     const scale = handBone.getWorldScale(new THREE.Vector3()).x;
     tunnelOffset[B(side + 'Hand')] = localOffset.multiplyScalar(scale * TUNNEL_OFFSET_FACTOR);
 
+    // Measure the hand's own anatomy off the rig (see restHandFrame).
+    if (idxBone && pinkyBone) {
+      const shaftAxis = wp(idxBone).sub(wp(pinkyBone));
+      const knuckle   = wp(midBone).sub(wp(handBone));
+      if (shaftAxis.lengthSq() > 1e-12 && knuckle.lengthSq() > 1e-12) {
+        restHandFrame[B(side + 'Hand')] = {
+          shaft:   shaftAxis.normalize(),
+          knuckle: knuckle.normalize(),
+        };
+      }
+    }
+
     if (foreArmBone) {
-      const elbowWorld = new THREE.Vector3(), wristWorld = new THREE.Vector3();
-      foreArmBone.getWorldPosition(elbowWorld);
-      handBone.getWorldPosition(wristWorld);
-      restForearmLenWorld[B(side + 'ForeArm')] = elbowWorld.distanceTo(wristWorld);
+      restForearmLenWorld[B(side + 'ForeArm')] = wp(foreArmBone).distanceTo(wp(handBone));
     }
   });
 }
@@ -291,44 +315,96 @@ function driveBone(bones, boneName, targetDir) {
   bone.updateMatrixWorld(true);
 }
 
-// Curl a hand's fingers into a fist-like grip (or back to flat/open when
-// curlDeg is 0). Mixamo hand bones are rigged with the finger's own length
-// along local +X and the knuckle-to-knuckle row along local Z, so a rotation
-// about local Z sweeps the fingertip from "pointing out" (+X) toward the
-// palm — i.e. a natural curl. The right hand's finger-length axis points
-// along -X instead of +X (mirrored rig), so its curl sign is flipped to
-// close in the same physical direction as the left hand.
-const GRIP_FINGERS = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'];
-const GRIP_CURL_DEG = 65;
-function curlFingers(bones, side, curlDeg) {
+// Curl a hand's fingers around the shaft. Mixamo hand bones are rigged with
+// the finger's own length along local +X and the knuckle-to-knuckle row along
+// local Z, so a rotation about local Z sweeps the fingertip from "pointing
+// out" (+X) toward the palm — i.e. a natural curl. The right hand's
+// finger-length axis points along -X instead of +X (mirrored rig), so its curl
+// sign is flipped to close in the same physical direction as the left hand.
+//
+// The three knuckles get DIFFERENT angles. A hand closing on a golf grip is
+// not a fist: the shaft holds the base joints open while the middle and tip
+// joints fold right around it, so a single angle repeated down the chain
+// either leaves the fingers splayed off the shaft or curls the base so far
+// that the fingertips drive back through the palm.
+const GRIP_FINGERS = ['Index', 'Middle', 'Ring', 'Pinky'];
+const GRIP_CURL_DEG = [52, 78, 55];  // base, middle, tip
+// The thumbs do not curl at all — on a golf grip they lie ALONG the shaft
+// pointing at the clubhead (the trail hand's palm then covers the lead thumb),
+// which is most of what makes a golf grip read as a golf grip rather than as
+// two fists. Only a slight bend at the knuckles.
+const THUMB_BEND_DEG = [0, 14, 10];
+function curlFingers(bones, side, amount) {
   const sign = side === 'Left' ? 1 : -1;
-  const qZ = new THREE.Quaternion().setFromAxisAngle(
-    new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(sign * curlDeg));
-  GRIP_FINGERS.forEach(finger => {
+  const setCurl = (finger, degrees) => {
     for (let i = 1; i <= 3; i++) {
       const name = B(side + 'Hand' + finger + i);
       const bone = bones[name];
       const rest = restLocalQ[name];
       if (!bone || !rest) continue;
-      bone.quaternion.copy(rest.clone().multiply(qZ));
+      const q = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, 1),
+        THREE.MathUtils.degToRad(sign * degrees[i - 1] * amount));
+      bone.quaternion.copy(rest.clone().multiply(q));
       bone.updateMatrix();
       bone.updateMatrixWorld(true);
     }
-  });
+  };
+  GRIP_FINGERS.forEach(finger => setCurl(finger, GRIP_CURL_DEG));
+  setCurl('Thumb', THUMB_BEND_DEG);
 }
 
-// World-space quaternion the hand bone should have so its local Z axis (the
-// knuckle row — see curlFingers above) aligns with the shaft direction, so a
-// curled fist closes AROUND the shaft rather than punching along it. Pure
-// function of cached rest data — doesn't require the bone to be posed yet.
-function gripHandWorldQuat(side, shaftDir) {
+// Lay the thumb down the shaft toward the clubhead. Runs after the hand is
+// oriented, so it only has to fix the thumb's direction; the small bend from
+// curlFingers stays on the joints below it.
+//
+// The thumb is aimed at a point ON the shaft one thumb-length further down it,
+// not simply pointed in the shaft's direction: the thumb's knuckle sits off to
+// the side of the palm, so merely matching the direction leaves it running
+// parallel to the club a few centimetres clear of it — two thumbs sticking up
+// in the air. Converging on the shaft makes it lie along the grip.
+function layThumbAlongShaft(bones, side, gripPoint, shaftUnit) {
+  const name = B(side + 'HandThumb1');
+  const bone = bones[name];
+  const tip = bones[B(side + 'HandThumb4')];
+  if (!bone || !tip) return;
+  const base = bone.getWorldPosition(new THREE.Vector3());
+  const reach = base.distanceTo(tip.getWorldPosition(new THREE.Vector3()));
+  const t = base.clone().sub(gripPoint).dot(shaftUnit);
+  const target = gripPoint.clone().addScaledVector(shaftUnit, t + reach);
+  driveBone(bones, name, target.sub(base));
+}
+
+// Build the world quaternion that carries a hand's rest anatomy onto a target
+// orientation: `shaftDir` is where the club crosses the palm, `knuckleDir` is
+// where the knuckles sit relative to the wrist (which fixes the roll AROUND
+// the shaft — the one thing aligning a single axis leaves undetermined, and
+// the reason hands used to end up gripping at arbitrary angles).
+function orthoFrame(primary, secondary) {
+  const x = primary.clone().normalize();
+  let y = secondary.clone().sub(x.clone().multiplyScalar(secondary.dot(x)));
+  if (y.lengthSq() < 1e-10) {
+    // Degenerate: pick any direction off the primary axis.
+    y = new THREE.Vector3(0, 1, 0).sub(x.clone().multiplyScalar(x.y));
+    if (y.lengthSq() < 1e-10) y = new THREE.Vector3(1, 0, 0).sub(x.clone().multiplyScalar(x.x));
+  }
+  y.normalize();
+  const z = new THREE.Vector3().crossVectors(x, y);
+  return new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(x, y, z));
+}
+
+function gripHandWorldQuat(side, shaftDir, knuckleDir) {
   const handName = B(side + 'Hand');
   const rWorldQ = restWorldQ[handName];
-  if (!rWorldQ || shaftDir.lengthSq() < 1e-8) return null;
-  const td = shaftDir.clone().normalize();
-  const zAxisRest = new THREE.Vector3(0, 0, 1).applyQuaternion(rWorldQ);
-  const R = new THREE.Quaternion().setFromUnitVectors(zAxisRest, td);
-  return rWorldQ.clone().premultiply(R);
+  const rest = restHandFrame[handName];
+  if (!rWorldQ || !rest || shaftDir.lengthSq() < 1e-8) return null;
+  const kd = (knuckleDir && knuckleDir.lengthSq() > 1e-8) ? knuckleDir : rest.knuckle;
+  const qRest   = orthoFrame(rest.shaft, rest.knuckle);
+  const qTarget = orthoFrame(shaftDir, kd);
+  // World-space rotation taking the rest anatomy onto the target anatomy,
+  // then applied on top of the hand's rest orientation.
+  return qTarget.clone().multiply(qRest.invert()).multiply(rWorldQ);
 }
 
 // Where the wrist pivot should sit so the curled-finger "tunnel" (cached in
@@ -337,11 +413,71 @@ function gripHandWorldQuat(side, shaftDir) {
 // this SAME point instead of the raw grip — otherwise the forearm's fixed
 // rest length reaches toward one point while the wrist gets pinned to a
 // different one, tearing the mesh apart at the wrist.
-function gripWristTarget(side, gripVec, shaftDir) {
+function gripWristTarget(side, gripVec, shaftDir, knuckleDir) {
   const offset = tunnelOffset[B(side + 'Hand')];
-  const worldQ = gripHandWorldQuat(side, shaftDir);
+  const worldQ = gripHandWorldQuat(side, shaftDir, knuckleDir);
   if (!offset || !worldQ) return gripVec;
   return gripVec.clone().sub(offset.clone().applyQuaternion(worldQ));
+}
+
+// Where a hand sits ALONG the shaft: its own wrist landmark projected onto the
+// shaft line. Both hands used to be pinned to the same point (the wrist
+// midpoint the club estimator reports as "the grip"), which drove them into
+// each other; projecting each separately stacks the lead hand above the trail
+// hand by however much the video says they are apart, which is what a real
+// two-handed grip looks like.
+function handShaftPoint(wristLM, gripVec, shaftUnit) {
+  if (!wristLM) return gripVec.clone();
+  const t = wristLM.clone().sub(gripVec).dot(shaftUnit);
+  return gripVec.clone().addScaledVector(shaftUnit, t);
+}
+
+// How far out from the wrist joint the club actually crosses the hand — the
+// same wrist→tunnel distance cached in tunnelOffset, averaged over both hands.
+function palmReach() {
+  const lens = ['Left', 'Right']
+    .map(s => tunnelOffset[B(s + 'Hand')])
+    .filter(Boolean)
+    .map(o => o.length());
+  return lens.length ? lens.reduce((a, b) => a + b, 0) / lens.length : 0;
+}
+
+// The club estimator reports the grip as the midpoint of the two WRIST
+// landmarks, but nobody holds a club at the wrist — it crosses the palms a
+// palm-length further out, along the knuckles. Rendering the shaft through the
+// wrist joints meant the hands had to be dragged backwards onto it, which
+// compressed the forearm (down to 0.47x on this video) and stretched the palm
+// to twice its length to make up the difference. Shifting the whole club out
+// to where the hands really close around it keeps every arm bone at its
+// natural length instead. Rendering only — the metrics in club_estimation.py
+// are computed from the unshifted data, and a near-constant offset would not
+// change the velocities they derive anyway.
+function palmShift(knuckleDir) {
+  const avg = new THREE.Vector3();
+  let n = 0;
+  ['Left', 'Right'].forEach(s => {
+    const d = knuckleDir[s];
+    if (d && d.lengthSq() > 1e-8) { avg.add(d.clone().normalize()); n++; }
+  });
+  if (!n || avg.lengthSq() < 1e-8) return new THREE.Vector3();
+  return avg.normalize().multiplyScalar(palmReach());
+}
+
+// Which way the knuckles point, read off the video: MediaPipe tracks a pinky,
+// index and thumb per hand, so the hand's roll around the shaft is measured
+// rather than invented. Falls back to the forearm direction (the hand roughly
+// continues the forearm) when those landmarks were dropped.
+function measuredKnuckleDir(lm, side, elbowLM, wristLM) {
+  const w = side === 'Left' ? lm(15) : lm(16);
+  const pinky = side === 'Left' ? lm(17) : lm(18);
+  const index = side === 'Left' ? lm(19) : lm(20);
+  const knuckles = avgPts(pinky, index);
+  if (w && knuckles) {
+    const d = knuckles.clone().sub(w);
+    if (d.lengthSq() > 1e-8) return d;
+  }
+  if (elbowLM && wristLM) return wristLM.clone().sub(elbowLM);
+  return null;
 }
 
 // Stretch the forearm along its local length axis (X — see the Hand child's
@@ -356,7 +492,7 @@ function gripWristTarget(side, gripVec, shaftDir) {
 // same mechanism standard "stretchy bone" IK rigs use. The hand bone gets
 // the inverse scale so its own geometry (and the fingers hanging off it)
 // doesn't balloon or shrink along with the forearm.
-const FOREARM_STRETCH_LIMITS = [0.4, 2.0];
+const FOREARM_STRETCH_LIMITS = [0.75, 1.35];
 function stretchForearmToTarget(bones, side, worldTarget) {
   const foreArm = bones[B(side + 'ForeArm')];
   const hand = bones[B(side + 'Hand')];
@@ -369,11 +505,20 @@ function stretchForearmToTarget(bones, side, worldTarget) {
     worldTarget.distanceTo(elbowWorld) / restLen,
     FOREARM_STRETCH_LIMITS[0], FOREARM_STRETCH_LIMITS[1]);
 
-  foreArm.scale.set(k, 1, 1);
+  // Scale UNIFORMLY, not just along the length axis. The hand hangs off the
+  // forearm and cancels this scale with its own 1/k so it keeps its true size
+  // — but that cancellation only holds if the two agree on which direction is
+  // being scaled. Once the hand is rotated to wrap the shaft its local axes no
+  // longer line up with the forearm's, and a (k,1,1) stretch leaks through as
+  // a palm inflated by 1/k (30% oversized hands on this video). A uniform
+  // scale commutes with that rotation, so the hand comes out exactly right at
+  // any grip angle; the cost is the forearm changing thickness slightly along
+  // with its length.
+  foreArm.scale.setScalar(k);
   foreArm.updateMatrix();
   foreArm.updateMatrixWorld(true);
 
-  hand.scale.set(1 / k, 1, 1);
+  hand.scale.setScalar(1 / k);
   hand.updateMatrix();
   hand.updateMatrixWorld(true);
 }
@@ -410,17 +555,17 @@ function driveForeArmToGrip(bones, side, worldTarget) {
 // (not the hand's own position) so the wrist lands on the tunnel-adjusted
 // grip point. Must run after driveForeArmToGrip (see updateSkeleton), so the
 // forearm's local X already points the right way before we scale it.
-function orientHandOnGrip(bones, side, gripVec, shaftDir) {
+function orientHandOnGrip(bones, side, gripVec, shaftDir, knuckleDir) {
   const handName = B(side + 'Hand');
   const bone = bones[handName];
-  const desiredWorldQ = gripHandWorldQuat(side, shaftDir);
+  const desiredWorldQ = gripHandWorldQuat(side, shaftDir, knuckleDir);
   if (!bone || !desiredWorldQ) return;
 
   setBoneWorldQ(bone, desiredWorldQ);
   bone.updateMatrix();
   bone.updateMatrixWorld(true);
 
-  stretchForearmToTarget(bones, side, gripWristTarget(side, gripVec, shaftDir));
+  stretchForearmToTarget(bones, side, gripWristTarget(side, gripVec, shaftDir, knuckleDir));
 }
 
 // ── Load Soldier.glb ──
@@ -572,10 +717,40 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
   let gripVec = null;
   let shaftEndVec = null;
   let shaftDir = null;
+  let handPoint = null;   // side → point on the shaft where that hand grips
+  let knuckleDir = null;  // side → which way that hand's knuckles face
+  let buttExtend = 0;     // how far the butt pokes out past the topmost hand
   if (clubFrame && clubFrame.has_club && clubFrame.grip && clubFrame.shaft_end) {
-    gripVec     = new THREE.Vector3(clubFrame.grip.x,      -clubFrame.grip.y,      -clubFrame.grip.z);
-    shaftEndVec = new THREE.Vector3(clubFrame.shaft_end.x, -clubFrame.shaft_end.y, -clubFrame.shaft_end.z);
-    shaftDir    = shaftEndVec.clone().sub(gripVec);
+    const rawGrip = new THREE.Vector3(clubFrame.grip.x,      -clubFrame.grip.y,      -clubFrame.grip.z);
+    const rawEnd  = new THREE.Vector3(clubFrame.shaft_end.x, -clubFrame.shaft_end.y, -clubFrame.shaft_end.z);
+    const dir = rawEnd.clone().sub(rawGrip);
+    if (dir.lengthSq() > 1e-8) {
+      // How each hand is rolled around the shaft, measured from the video's
+      // own hand landmarks (see measuredKnuckleDir).
+      knuckleDir = {
+        Left:  measuredKnuckleDir(lm, 'Left',  lm13, lm15),
+        Right: measuredKnuckleDir(lm, 'Right', lm14, lm16),
+      };
+      const shift = palmShift(knuckleDir);
+      gripVec     = rawGrip.add(shift);
+      shaftEndVec = rawEnd.add(shift);
+      shaftDir    = dir;
+      const shaftUnit = dir.clone().normalize();
+      // Each hand rides the shaft at its own wrist, carried out to the palm by
+      // the same shift, so the two stack instead of colliding.
+      handPoint = {
+        Left:  handShaftPoint(lm15 && lm15.clone().add(shift), gripVec, shaftUnit),
+        Right: handShaftPoint(lm16 && lm16.clone().add(shift), gripVec, shaftUnit),
+      };
+      // Butt cap: the club has to continue past whichever hand is highest on
+      // it, or the shaft appears to start inside the fists. Which hand that is
+      // comes from the data, so left- and right-handed golfers both work
+      // without being told which.
+      const topT = Math.min(
+        handPoint.Left.clone().sub(gripVec).dot(shaftUnit),
+        handPoint.Right.clone().sub(gripVec).dot(shaftUnit));
+      buttExtend = Math.max(0, -topT) + BUTT_CAP_M;
+    }
   }
   // Shoulder + upper-arm chain always follows the landmarks directly.
   drive(B('LeftShoulder'),  shoulderCtr, lm11);
@@ -596,12 +771,14 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
     // rotation were aimed from a different point the two would disagree on
     // which direction is "toward the target", sending the stretched hand
     // off at an angle instead of onto the grip.
-    driveForeArmToGrip(bones, 'Left',  gripWristTarget('Left',  gripVec, shaftDir));
-    driveForeArmToGrip(bones, 'Right', gripWristTarget('Right', gripVec, shaftDir));
-    orientHandOnGrip(bones, 'Left',  gripVec, shaftDir);
-    orientHandOnGrip(bones, 'Right', gripVec, shaftDir);
-    curlFingers(bones, 'Left',  GRIP_CURL_DEG);
-    curlFingers(bones, 'Right', GRIP_CURL_DEG);
+    const shaftUnit = shaftDir.clone().normalize();
+    ['Left', 'Right'].forEach(side => {
+      driveForeArmToGrip(bones, side,
+        gripWristTarget(side, handPoint[side], shaftDir, knuckleDir[side]));
+      orientHandOnGrip(bones, side, handPoint[side], shaftDir, knuckleDir[side]);
+      curlFingers(bones, side, 1);
+      layThumbAlongShaft(bones, side, handPoint[side], shaftUnit);
+    });
   } else {
     drive(B('LeftForeArm'),  lm13, lm15);
     drive(B('RightForeArm'), lm14, lm16);
@@ -628,16 +805,19 @@ function updateSkeleton(sceneObj, frameData, clubFrame) {
   // rotation-only so the rig's proportions (clavicle, spine, hip) are
   // preserved; only the leaf HAND bones get their position overridden.
 
-  // Club shaft + head + swing trail (unchanged from original)
-  if (clubFrame && clubFrame.has_club && clubFrame.grip && clubFrame.shaft_end) {
-    const grip = new THREE.Vector3(clubFrame.grip.x, -clubFrame.grip.y, -clubFrame.grip.z);
-    const end  = new THREE.Vector3(clubFrame.shaft_end.x, -clubFrame.shaft_end.y, -clubFrame.shaft_end.z);
-    const dir  = new THREE.Vector3().subVectors(end, grip);
-    const len  = dir.length();
+  // Club shaft + head + swing trail. Drawn at the palm-shifted position worked
+  // out above so the rendered club is the same one the hands are gripping.
+  if (gripVec && shaftEndVec && shaftDir) {
+    const grip = gripVec;
+    const end  = shaftEndVec;
+    const len  = shaftDir.length();
+    const unit = shaftDir.clone().normalize();
 
-    sceneObj.shaft.position.copy(grip);
-    sceneObj.shaft.scale.set(1, len, 1);
-    sceneObj.shaft.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+    // Start the shaft above the topmost hand (see buttExtend) so the club runs
+    // through the grip and out the top, instead of beginning inside the fists.
+    sceneObj.shaft.position.copy(grip).addScaledVector(unit, -buttExtend);
+    sceneObj.shaft.scale.set(1, len + buttExtend, 1);
+    sceneObj.shaft.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), unit);
     sceneObj.shaft.visible = true;
 
     sceneObj.clubhead.position.copy(end);
