@@ -22,7 +22,6 @@ import streamlit as st
 
 # ── Internal package imports ────────────────────────────────────────────────
 from golf_pose_pro.pose_extraction import (
-    add_silent_audio,
     extract_pose_features,
     extract_full_3d_landmarks,
     extract_y_series,
@@ -682,21 +681,18 @@ if analyze_btn:
     # ── Save uploads to temp files ────────────────────────────────────────
     tmp_dir = tempfile.mkdtemp(prefix="golfposepro_")
 
-    student_raw  = os.path.join(tmp_dir, "student_raw.mp4")
-    student_path = os.path.join(tmp_dir, "student_fixed.mp4")
-    with open(student_raw, "wb") as f:
+    student_path = os.path.join(tmp_dir, "student_raw.mp4")
+    with open(student_path, "wb") as f:
         f.write(student_file.getbuffer())
 
     if pro_file is not None:
-        pro_raw  = os.path.join(tmp_dir, "pro_raw.mp4")
-        pro_path = os.path.join(tmp_dir, "pro_fixed.mp4")
-        with open(pro_raw, "wb") as f:
+        pro_path = os.path.join(tmp_dir, "pro_raw.mp4")
+        with open(pro_path, "wb") as f:
             f.write(pro_file.getbuffer())
     else:
-        pro_raw  = builtin_pro_path
-        pro_path = os.path.join(tmp_dir, "pro_fixed.mp4")
+        pro_path = builtin_pro_path
 
-    has_pro = (pro_raw is not None)
+    has_pro = (pro_path is not None)
 
     # ── Status UI ────────────────────────────────────────────────────────
     progress_bar  = st.progress(0, text="Starting analysis…")
@@ -705,12 +701,6 @@ if analyze_btn:
     def update_progress(pct: int, msg: str):
         progress_bar.progress(pct, text=msg)
         status_text.markdown(f"*{msg}*")
-
-    # ── Step 1: Audio fix ─────────────────────────────────────────────────
-    update_progress(5, "🔇 Adding silent audio track…")
-    add_silent_audio(student_raw, student_path)
-    if has_pro:
-        add_silent_audio(pro_raw, pro_path)
 
     # ── Step 2: Pose extraction ───────────────────────────────────────────
     update_progress(10, "🧠 Extracting pose landmarks — student video…")
