@@ -2,5 +2,4 @@ ffmpeg
 libgles2
 libgl1
 libglib2.0-0
-mesa-glx
 libglu1-mesa
