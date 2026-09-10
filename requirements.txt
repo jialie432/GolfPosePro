@@ -1,5 +1,5 @@
-streamlit>=1.32.0
-mediapipe==0.10.21
+streamlit>=1.63.0
+mediapipe==0.10.33
 opencv-python-headless
 moviepy==1.0.3
 matplotlib
