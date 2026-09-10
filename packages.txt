@@ -1,2 +1,3 @@
 ffmpeg
 libgles2
+libgl1-mesa-glx
